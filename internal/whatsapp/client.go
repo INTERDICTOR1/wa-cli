@@ -146,15 +146,19 @@ func (c *Client) ingestHistorySync(evt *events.HistorySync) {
 			continue
 		}
 
-		var lastAt int64
+		// History lists messages newest first, so take the maximum rather
+		// than trusting either end, and also consider the conversation's
+		// own timestamps (what WhatsApp itself sorts chats by).
+		var newest uint64
 		var preview string
-		if len(msgs) > 0 {
-			last := msgs[len(msgs)-1].GetMessage()
-			if ts := last.GetMessageTimestamp(); ts > 0 {
-				lastAt = int64(ts) * 1000
+		for _, hm := range msgs {
+			if ts := hm.GetMessage().GetMessageTimestamp(); ts > newest {
+				newest = ts
+				preview = extractPreview(hm.GetMessage().GetMessage())
 			}
-			preview = extractPreview(last.GetMessage())
 		}
+		newest = max(newest, conv.GetLastMsgTimestamp(), conv.GetConversationTimestamp())
+		lastAt := int64(newest) * 1000
 
 		err := c.chats.Upsert(chatstore.Chat{
 			JID:                jid,
