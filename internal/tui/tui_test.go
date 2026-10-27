@@ -95,6 +95,23 @@ func TestFilterOpenAndEsc(t *testing.T) {
 	}
 }
 
+func TestEmojiFromWindowsSurrogateHalves(t *testing.T) {
+	var m tea.Model = newModel(nil, nil, nil, nil, nil)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = m.Update(chatsLoadedMsg{chats: []chatstore.Chat{{JID: "1@s.whatsapp.net", Name: "Alice"}}})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// 😀 (U+1F600) as Windows delivers it: two key presses, one per UTF-16 unit.
+	half := func(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
+	m = typeKeys(m, "hi ")
+	m, _ = m.Update(half(0xD83D))
+	m, _ = m.Update(half(0xDE00))
+	m = typeKeys(m, "!")
+	if got := m.(model).input.Value(); got != "hi 😀!" {
+		t.Fatalf("input = %q, want %q", got, "hi 😀!")
+	}
+}
+
 func TestCursorVisibleInListAndInput(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(termenv.Ascii)

@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -62,6 +64,11 @@ func Run(a *app.App) error {
 	}
 
 	openDebugLog(a.Config.DataDir)
+
+	// Ask the Go runtime to keep its memory under 80 MB by collecting
+	// garbage harder as it gets close (a soft target, not a hard cap). Keeps
+	// startup sync and image previews well inside the 100 MB budget.
+	debug.SetMemoryLimit(80 << 20)
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
 
@@ -135,6 +142,10 @@ type model struct {
 	// backfilled records chats whose older history was already requested
 	// from the phone this session.
 	backfilled map[string]bool
+	// pendingHigh holds the first half of an emoji typed on Windows until
+	// its second half arrives (see joinSurrogates).
+	pendingHigh rune
+	previews    *previewCache
 	// groupNames maps a group JID to its real name, fetched via
 	// ListGroups since chatstore's own name field for groups only ever
 	// comes from HistorySync, which isn't reliable.
@@ -197,6 +208,7 @@ func newModel(ctx context.Context, client *whatsapp.Client, cs *chatstore.Store,
 		names:       map[string]string{},
 		groupNames:  map[string]string{},
 		backfilled:  map[string]bool{},
+		previews:    newPreviewCache(),
 	}
 }
 
@@ -409,6 +421,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = msg.msgs
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
+		m.previews.setOpen(msg.chatJID)
+		for _, dm := range msg.msgs {
+			if m.previews.needsPreview(dm.Message) {
+				return m, loadPreviewsCmd(m.ctx, m.client, m.previews, msg.chatJID, msg.msgs)
+			}
+		}
+		return m, nil
+
+	case previewsReadyMsg:
+		if msg.chatJID == m.openJID {
+			atBottom := m.viewport.AtBottom()
+			m.viewport.SetContent(m.renderMessages())
+			if atBottom {
+				m.viewport.GotoBottom()
+			}
+		}
 		return m, nil
 
 	case incomingMsg:
@@ -432,6 +460,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		dlog("key %q focus=%d selected=%s", msg.String(), m.focus, m.selectedJID)
+		msg, complete := m.joinSurrogates(msg)
+		if !complete {
+			return m, nil
+		}
 		return m.handleKey(msg)
 	}
 
@@ -529,6 +561,29 @@ func (m *model) preview() tea.Cmd {
 	m.messages = nil
 	m.viewport.SetContent("")
 	return loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, false)
+}
+
+// joinSurrogates reassembles characters outside the Basic Multilingual
+// Plane (emoji). On Windows, Bubble Tea v1 turns each UTF-16 unit of the
+// console input into its own key press, so an emoji arrives as two key
+// presses each holding half a surrogate pair. complete is false while
+// waiting for the second half.
+func (m *model) joinSurrogates(msg tea.KeyMsg) (tea.KeyMsg, bool) {
+	high := m.pendingHigh
+	m.pendingHigh = 0
+	if msg.Type != tea.KeyRunes || len(msg.Runes) != 1 || !utf16.IsSurrogate(msg.Runes[0]) {
+		return msg, true
+	}
+	r := msg.Runes[0]
+	if r < 0xDC00 { // first half
+		m.pendingHigh = r
+		return msg, false
+	}
+	if high == 0 { // second half without a first: drop it
+		return msg, false
+	}
+	msg.Runes = []rune{utf16.DecodeRune(high, r)}
+	return msg, true
 }
 
 // setFilter changes the chat-list filter and highlights the first match.
@@ -719,6 +774,9 @@ func (m model) renderMessages() string {
 			name := senderNameStyle.Render(msg.Sender)
 			line = fmt.Sprintf("%s %s: %s", ts, name, theirMsgStyle.Render(text))
 			align = lipgloss.Left
+		}
+		if preview, ok := m.previews.get(msg.ID); ok && preview != "" {
+			line += "\n" + preview
 		}
 
 		b.WriteString(lipgloss.NewStyle().Width(width).Align(align).Render(line) + "\n")
