@@ -12,6 +12,7 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,9 +24,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/codebyoketch/wa-cli/internal/app"
 	"github.com/codebyoketch/wa-cli/internal/chatstore"
@@ -281,14 +284,32 @@ func loadMessagesCmd(ctx context.Context, client *whatsapp.Client, cs *chatstore
 	}
 }
 
-func sendCmd(ctx context.Context, client *whatsapp.Client, guard *safety.Guard, jidStr, text string) tea.Cmd {
+func sendCmd(ctx context.Context, client *whatsapp.Client, ms *msgstore.Store, guard *safety.Guard, jidStr, text string) tea.Cmd {
 	return func() tea.Msg {
 		jid, err := types.ParseJID(jidStr)
 		if err != nil {
 			return sendResultMsg{err: err}
 		}
-		if _, err := client.SendText(ctx, jid, text); err != nil {
+		id, err := client.SendText(ctx, jid, text)
+		if err != nil {
 			return sendResultMsg{err: err}
+		}
+		// WhatsApp doesn't echo this device's own sends back as events, so
+		// save it here (as `wa chat send` does) or it vanishes from history.
+		var raw string
+		if b, err := proto.Marshal(&waProto.Message{Conversation: proto.String(text)}); err == nil {
+			raw = base64.StdEncoding.EncodeToString(b)
+		}
+		if err := ms.Append(msgstore.Message{
+			ID:        id,
+			ChatJID:   jidStr,
+			SenderJID: "me",
+			Timestamp: time.Now().UnixMilli(),
+			Text:      text,
+			FromMe:    true,
+			RawProto:  raw,
+		}); err != nil {
+			return sendResultMsg{err: fmt.Errorf("sent, but saving to history failed: %w", err)}
 		}
 		if guard != nil {
 			_ = guard.MarkKnown(jidStr)
@@ -452,7 +473,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
 
-		return m, sendCmd(m.ctx, m.client, m.guard, m.openJID, text)
+		return m, sendCmd(m.ctx, m.client, m.ms, m.guard, m.openJID, text)
 	}
 
 	var cmd tea.Cmd
