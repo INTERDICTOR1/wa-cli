@@ -56,6 +56,8 @@ func Run(a *app.App) error {
 		}()
 	}
 
+	openDebugLog(a.Config.DataDir)
+
 	dbLog := waLog.Stdout("Database", "WARN", true)
 
 	container, err := store.Open(ctx, a.Config.DataDir, dbLog)
@@ -81,6 +83,9 @@ func Run(a *app.App) error {
 
 	client.OnIncomingMessage(func(msg msgstore.Message) {
 		p.Send(incomingMsg{msg: msg})
+	})
+	client.WA.AddEventHandler(func(evt interface{}) {
+		dlog("wa event %T", evt)
 	})
 
 	if err := client.WA.Connect(); err != nil {
@@ -318,6 +323,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		dlog("key %q focus=%d selected=%s", msg.String(), m.focus, m.selectedJID)
 		return m.handleKey(msg)
 	}
 
@@ -464,7 +470,9 @@ func (m model) View() string {
 	footer = append(footer, helpStyle.Render(
 		"↑/↓ navigate · enter open/send · tab switch focus · esc back · q/ctrl+c quit"))
 
-	return lipgloss.JoinVertical(lipgloss.Left, append([]string{body}, footer...)...)
+	frame := lipgloss.JoinVertical(lipgloss.Left, append([]string{body}, footer...)...)
+	dlog("view %d lines, terminal height %d", strings.Count(frame, "\n")+1, m.height)
+	return frame
 }
 
 func (m model) renderChatList() string {
