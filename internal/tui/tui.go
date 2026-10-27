@@ -94,6 +94,8 @@ func Run(a *app.App) error {
 		switch evt.(type) {
 		case *events.PushName, *events.Contact, *events.BusinessName, *events.AppStateSyncComplete, *events.HistorySync:
 			p.Send(namesChangedMsg{})
+		case *events.Connected:
+			p.Send(connectedMsg{})
 		}
 	})
 
@@ -130,6 +132,9 @@ type model struct {
 	// namesRefreshPending is set while a debounced names reload is
 	// scheduled, so a burst of name events triggers only one reload.
 	namesRefreshPending bool
+	// backfilled records chats whose older history was already requested
+	// from the phone this session.
+	backfilled map[string]bool
 	// groupNames maps a group JID to its real name, fetched via
 	// ListGroups since chatstore's own name field for groups only ever
 	// comes from HistorySync, which isn't reliable.
@@ -167,6 +172,7 @@ type messagesLoadedMsg struct {
 	msgs    []displayMsg
 }
 type incomingMsg struct{ msg msgstore.Message }
+type connectedMsg struct{}
 type sendResultMsg struct{ err error }
 type errMsg struct{ err error }
 
@@ -190,15 +196,35 @@ func newModel(ctx context.Context, client *whatsapp.Client, cs *chatstore.Store,
 		statusLine:  "Connecting...",
 		names:       map[string]string{},
 		groupNames:  map[string]string{},
+		backfilled:  map[string]bool{},
 	}
 }
 
-// Init satisfies tea.Model: it kicks off the initial local-cache loads
-// (chats, groups) as async tea.Cmds so the first frame renders
-// immediately rather than blocking on disk/network reads. 1:1 chat names
-// load once the chat list arrives (see chatsLoadedMsg).
+// Init satisfies tea.Model: it kicks off the initial chat list load as an
+// async tea.Cmd so the first frame renders immediately. 1:1 chat names
+// load once the chat list arrives (see chatsLoadedMsg); groups load once
+// connected (see connectedMsg).
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadChatsCmd(m.cs), loadGroupsCmd(m.ctx, m.client))
+	return loadChatsCmd(m.cs)
+}
+
+// backfillCmd asks the phone for older messages if chatJID's stored
+// history doesn't reach back msgstore.RetainFor. It needs at least one
+// stored message to anchor the request.
+func backfillCmd(ctx context.Context, client *whatsapp.Client, ms *msgstore.Store, chatJID string) tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := ms.List(chatJID)
+		if err != nil || len(msgs) == 0 {
+			return nil
+		}
+		if time.Since(time.UnixMilli(msgs[0].Timestamp)) >= msgstore.RetainFor {
+			return nil
+		}
+		if err := client.RequestOlderMessages(ctx, msgs[0], 50); err != nil {
+			return errMsg{fmt.Errorf("requesting older messages: %w", err)}
+		}
+		return nil
+	}
 }
 
 // loadNamesCmd resolves display names for the given 1:1 chat JIDs from
@@ -367,9 +393,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case connectedMsg:
+		// Fetching joined groups also stores every member's LID->phone
+		// mapping, so names can resolve. Only safe once connected.
+		return m, loadGroupsCmd(m.ctx, m.client)
+
 	case groupsLoadedMsg:
 		m.groupNames = msg.names
-		return m, nil
+		return m, func() tea.Msg { return namesChangedMsg{} }
 
 	case messagesLoadedMsg:
 		if msg.chatJID != m.openJID {
@@ -404,7 +435,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 
-	return m, nil
+	// Anything else (e.g. the cursor's blink ticks) belongs to the input.
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -426,8 +460,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openJID = m.selectedJID
 			m.filter = ""
 			m.focus = focusInput
-			m.input.Focus()
-			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, true)
+			cmds := []tea.Cmd{m.input.Focus(), loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, true)}
+			if !m.backfilled[m.openJID] {
+				m.backfilled[m.openJID] = true
+				cmds = append(cmds, backfillCmd(m.ctx, m.client, m.ms, m.openJID))
+			}
+			return m, tea.Batch(cmds...)
 		case tea.KeyEsc:
 			m.setFilter("")
 		case tea.KeyBackspace:
@@ -600,11 +638,17 @@ func (m model) View() string {
 
 func (m model) renderChatList() string {
 	var b strings.Builder
-	header := "Chats"
-	if m.filter != "" {
-		header = "Find: " + m.filter
+	// While the list has focus, typing goes to the search, so show it with
+	// a block cursor; otherwise just the title.
+	if m.focus == focusChatList {
+		search, room := "Search: "+m.filter, sidebarWidth-5 // text width minus cursor
+		if over := ansi.StringWidth(search) - room; over > 0 {
+			search = ansi.TruncateLeft(search, over+1, "…") // keep the end you're typing
+		}
+		b.WriteString(chatListHeaderStyle.Render(search) + lipgloss.NewStyle().Reverse(true).Render(" ") + "\n\n")
+	} else {
+		b.WriteString(chatListHeaderStyle.Render("Chats") + "\n\n")
 	}
-	b.WriteString(chatListHeaderStyle.Render(ansi.Truncate(header, sidebarWidth-2, "…")) + "\n\n")
 
 	visible := m.visibleChats()
 	if len(visible) == 0 {
