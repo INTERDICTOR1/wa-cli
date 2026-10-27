@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/codebyoketch/wa-cli/internal/app"
@@ -87,6 +88,10 @@ func Run(a *app.App) error {
 	})
 	client.WA.AddEventHandler(func(evt interface{}) {
 		dlog("wa event %T", evt)
+		switch evt.(type) {
+		case *events.PushName, *events.Contact, *events.BusinessName, *events.AppStateSyncComplete, *events.HistorySync:
+			p.Send(namesChangedMsg{})
+		}
 	})
 
 	if err := client.WA.Connect(); err != nil {
@@ -115,17 +120,17 @@ type model struct {
 	chats       []chatstore.Chat
 	selectedJID string // "" means none selected yet
 
-	// senderNames maps a JID to its best-known display name (from local
-	// contacts), used to show a real name instead of a generic "them"
-	// label — mainly matters in groups, where messages come from
-	// several different people.
-	senderNames map[string]string
+	// names maps a 1:1 chat JID to whatsapp.Client.ResolveName's result.
+	names map[string]string
+	// namesRefreshPending is set while a debounced names reload is
+	// scheduled, so a burst of name events triggers only one reload.
+	namesRefreshPending bool
 	// groupNames maps a group JID to its real name, fetched via
 	// ListGroups since chatstore's own name field for groups only ever
 	// comes from HistorySync, which isn't reliable.
 	groupNames map[string]string
 
-	messages []msgstore.Message
+	messages []displayMsg
 
 	viewport viewport.Model
 	input    textinput.Model
@@ -139,12 +144,22 @@ type model struct {
 
 // --- tea.Msg types for async results ---
 
+// displayMsg is a stored message plus its rendered form, computed off the
+// UI thread since resolving names touches the database.
+type displayMsg struct {
+	msgstore.Message
+	Sender string // resolved sender name; "" for your own messages
+	Body   string // whatsapp.Client.DisplayText output
+}
+
 type chatsLoadedMsg struct{ chats []chatstore.Chat }
-type contactsLoadedMsg struct{ names map[string]string }
+type namesLoadedMsg struct{ names map[string]string }
+type namesChangedMsg struct{}
+type refreshNamesMsg struct{}
 type groupsLoadedMsg struct{ names map[string]string }
 type messagesLoadedMsg struct {
 	chatJID string
-	msgs    []msgstore.Message
+	msgs    []displayMsg
 }
 type incomingMsg struct{ msg msgstore.Message }
 type sendResultMsg struct{ err error }
@@ -168,35 +183,41 @@ func newModel(ctx context.Context, client *whatsapp.Client, cs *chatstore.Store,
 		viewport:    vp,
 		focus:       focusChatList,
 		statusLine:  "Connecting...",
-		senderNames: map[string]string{},
+		names:       map[string]string{},
 		groupNames:  map[string]string{},
 	}
 }
 
 // Init satisfies tea.Model: it kicks off the initial local-cache loads
-// (chats, contacts, groups) as async tea.Cmds so the first frame renders
-// immediately rather than blocking on disk/network reads.
+// (chats, groups) as async tea.Cmds so the first frame renders
+// immediately rather than blocking on disk/network reads. 1:1 chat names
+// load once the chat list arrives (see chatsLoadedMsg).
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadChatsCmd(m.cs), loadContactsCmd(m.ctx, m.client), loadGroupsCmd(m.ctx, m.client))
+	return tea.Batch(loadChatsCmd(m.cs), loadGroupsCmd(m.ctx, m.client))
 }
 
-// loadContactsCmd reads local contacts (no network needed — see Phase 6)
-// to build a JID -> display name lookup, used mainly in groups where
-// messages come from several different senders.
-func loadContactsCmd(ctx context.Context, client *whatsapp.Client) tea.Cmd {
+// loadNamesCmd resolves display names for the given 1:1 chat JIDs from
+// local data only (contacts + LID mappings, no network).
+func loadNamesCmd(ctx context.Context, client *whatsapp.Client, jids []string) tea.Cmd {
 	return func() tea.Msg {
-		contacts, err := client.ListContacts(ctx)
-		if err != nil {
-			return errMsg{err}
+		names := make(map[string]string, len(jids))
+		for _, jid := range jids {
+			names[jid] = client.ResolveName(ctx, jid)
 		}
-		names := make(map[string]string, len(contacts))
-		for _, c := range contacts {
-			if c.Name != "" {
-				names[c.JID] = c.Name
-			}
-		}
-		return contactsLoadedMsg{names}
+		return namesLoadedMsg{names}
 	}
+}
+
+// userChatJIDs returns the JIDs of chats that are 1:1 (not groups),
+// optionally only those with no resolved name yet.
+func userChatJIDs(chats []chatstore.Chat, skip map[string]string) []string {
+	var jids []string
+	for _, c := range chats {
+		if _, done := skip[c.JID]; !c.IsGroup && !done {
+			jids = append(jids, c.JID)
+		}
+	}
+	return jids
 }
 
 // loadGroupsCmd fetches real group names via the account's joined-groups
@@ -230,14 +251,26 @@ func loadChatsCmd(cs *chatstore.Store) tea.Cmd {
 	}
 }
 
-func loadMessagesCmd(cs *chatstore.Store, ms *msgstore.Store, chatJID string) tea.Cmd {
+func loadMessagesCmd(ctx context.Context, client *whatsapp.Client, cs *chatstore.Store, ms *msgstore.Store, chatJID string) tea.Cmd {
 	return func() tea.Msg {
 		_ = cs.MarkRead(chatJID) // opening a chat marks it read, same as `wa chat open`
 		msgs, err := ms.List(chatJID)
 		if err != nil {
 			return errMsg{err}
 		}
-		return messagesLoadedMsg{chatJID: chatJID, msgs: msgs}
+		out := make([]displayMsg, 0, len(msgs))
+		for _, msg := range msgs {
+			body, hidden := client.DisplayText(ctx, msg)
+			if hidden {
+				continue
+			}
+			dm := displayMsg{Message: msg, Body: body}
+			if !msg.FromMe {
+				dm.Sender = client.ResolveName(ctx, msg.SenderJID)
+			}
+			out = append(out, dm)
+		}
+		return messagesLoadedMsg{chatJID: chatJID, msgs: out}
 	}
 }
 
@@ -278,17 +311,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedJID == "" && len(m.chats) > 0 {
 			m.selectedJID = m.chats[0].JID
 		}
+		var cmds []tea.Cmd
+		if missing := userChatJIDs(m.chats, m.names); len(missing) > 0 {
+			cmds = append(cmds, loadNamesCmd(m.ctx, m.client, missing))
+		}
 		if (wasEmpty || len(m.messages) == 0) && m.selectedJID != "" {
-			return m, loadMessagesCmd(m.cs, m.ms, m.selectedJID)
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID))
+		}
+		return m, tea.Batch(cmds...)
+
+	case namesLoadedMsg:
+		for jid, name := range msg.names {
+			m.names[jid] = name
 		}
 		return m, nil
 
-	case contactsLoadedMsg:
-		m.senderNames = msg.names
-		if len(m.messages) > 0 {
-			m.viewport.SetContent(m.renderMessages())
+	case namesChangedMsg:
+		// whatsmeow learned a new name. Wait a second so a burst of
+		// these (e.g. a history sync) costs one reload, not hundreds.
+		if m.namesRefreshPending {
+			return m, nil
 		}
-		return m, nil
+		m.namesRefreshPending = true
+		return m, tea.Tick(time.Second, func(time.Time) tea.Msg { return refreshNamesMsg{} })
+
+	case refreshNamesMsg:
+		m.namesRefreshPending = false
+		cmds := []tea.Cmd{loadNamesCmd(m.ctx, m.client, userChatJIDs(m.chats, nil))}
+		if m.selectedJID != "" {
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID))
+		}
+		return m, tea.Batch(cmds...)
 
 	case groupsLoadedMsg:
 		m.groupNames = msg.names
@@ -304,13 +357,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case incomingMsg:
-		var cmds []tea.Cmd
+		cmds := []tea.Cmd{loadChatsCmd(m.cs)}
 		if msg.msg.ChatJID == m.selectedJID {
-			m.messages = append(m.messages, msg.msg)
-			m.viewport.SetContent(m.renderMessages())
-			m.viewport.GotoBottom()
+			// Reload rather than append, so it gets the same rendering
+			// (names, mentions, reactions) as the rest of the chat.
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID))
 		}
-		cmds = append(cmds, loadChatsCmd(m.cs))
 		return m, tea.Batch(cmds...)
 
 	case sendResultMsg:
@@ -352,10 +404,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "up", "k":
 			m.moveSelection(-1)
-			return m, loadMessagesCmd(m.cs, m.ms, m.selectedJID)
+			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID)
 		case "down", "j":
 			m.moveSelection(1)
-			return m, loadMessagesCmd(m.cs, m.ms, m.selectedJID)
+			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID)
 		case "enter":
 			if m.selectedJID != "" {
 				m.focus = focusInput
@@ -385,11 +437,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Show it immediately rather than waiting for the send to
 		// round-trip — sendResultMsg corrects the status line if it
 		// actually failed.
-		m.messages = append(m.messages, msgstore.Message{
-			ChatJID:   m.selectedJID,
-			Text:      text,
-			FromMe:    true,
-			Timestamp: time.Now().UnixMilli(),
+		m.messages = append(m.messages, displayMsg{
+			Message: msgstore.Message{
+				ChatJID:   m.selectedJID,
+				Text:      text,
+				FromMe:    true,
+				Timestamp: time.Now().UnixMilli(),
+			},
+			Body: text,
 		})
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
@@ -499,8 +554,10 @@ func (m model) renderChatList() string {
 
 	for _, c := range m.chats[start:end] {
 		name := c.Name
-		if name == "" && c.IsGroup {
+		if c.IsGroup && name == "" {
 			name = m.groupNames[c.JID]
+		} else if !c.IsGroup && m.names[c.JID] != "" {
+			name = m.names[c.JID]
 		}
 		if name == "" {
 			name = c.JID
@@ -542,14 +599,7 @@ func (m model) renderMessages() string {
 
 	var b strings.Builder
 	for _, msg := range m.messages {
-		text := msg.Text
-		switch {
-		case msg.MediaType != "" && text != "":
-			text = fmt.Sprintf("[%s] %s", msg.MediaType, text)
-		case msg.MediaType != "":
-			text = fmt.Sprintf("[%s]", msg.MediaType)
-		}
-
+		text := msg.Body
 		ts := timestampStyle.Render(time.UnixMilli(msg.Timestamp).Local().Format("15:04"))
 
 		var line string
@@ -558,7 +608,7 @@ func (m model) renderMessages() string {
 			line = fmt.Sprintf("%s %s", myMsgStyle.Render(text), ts)
 			align = lipgloss.Right
 		} else {
-			name := senderNameStyle.Render(m.senderDisplayName(msg))
+			name := senderNameStyle.Render(msg.Sender)
 			line = fmt.Sprintf("%s %s: %s", ts, name, theirMsgStyle.Render(text))
 			align = lipgloss.Left
 		}
@@ -566,34 +616,6 @@ func (m model) renderMessages() string {
 		b.WriteString(lipgloss.NewStyle().Width(width).Align(align).Render(line) + "\n")
 	}
 	return b.String()
-}
-
-// senderDisplayName resolves a message's sender to a real name instead
-// of a generic "them" label. For a 1:1 chat, the chat's own name IS the
-// sender's name. For a group (multiple possible senders), it falls back
-// to the local contacts lookup, then the sender JID's phone number.
-func (m model) senderDisplayName(msg msgstore.Message) string {
-	if chat, ok := m.currentChat(); ok {
-		if !chat.IsGroup && chat.Name != "" {
-			return chat.Name
-		}
-	}
-	if name, ok := m.senderNames[msg.SenderJID]; ok && name != "" {
-		return name
-	}
-	if at := strings.Index(msg.SenderJID, "@"); at > 0 {
-		return msg.SenderJID[:at]
-	}
-	return "Unknown"
-}
-
-func (m model) currentChat() (chatstore.Chat, bool) {
-	for _, c := range m.chats {
-		if c.JID == m.selectedJID {
-			return c, true
-		}
-	}
-	return chatstore.Chat{}, false
 }
 
 func (m model) renderInputBar() string {

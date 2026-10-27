@@ -20,6 +20,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -119,6 +120,7 @@ func (c *Client) ingestHistorySync(evt *events.HistorySync) {
 
 		name := conv.GetName()
 		msgs := conv.GetMessages()
+		c.storeHistoryPushNames(jid, msgs)
 
 		// Skip pure noise: no name and no message history at all. These
 		// show up as bare @lid conversation stubs (e.g. group members
@@ -152,6 +154,34 @@ func (c *Client) ingestHistorySync(evt *events.HistorySync) {
 	}
 }
 
+// storeHistoryPushNames saves the sender push name carried on each
+// history-sync message into whatsmeow's contact store. whatsmeow only does
+// this itself for live messages and the separate push-name sync, so
+// without it most people you haven't saved stay nameless.
+func (c *Client) storeHistoryPushNames(chatJID string, msgs []*waHistorySync.HistorySyncMsg) {
+	ctx := context.Background()
+	for _, hm := range msgs {
+		wmi := hm.GetMessage()
+		push := wmi.GetPushName()
+		if push == "" || wmi.GetKey().GetFromMe() {
+			continue
+		}
+		sender := chatJID
+		if p := wmi.GetParticipant(); p != "" {
+			sender = p
+		} else if p := wmi.GetKey().GetParticipant(); p != "" {
+			sender = p
+		}
+		jid, err := types.ParseJID(sender)
+		if err != nil || jid.Server == types.GroupServer {
+			continue
+		}
+		if _, _, err := c.WA.Store.Contacts.PutPushName(ctx, jid.ToNonAD(), push); err != nil {
+			c.log.Warnf("storing history push name for %s failed: %v", jid, err)
+		}
+	}
+}
+
 // statusBroadcastJID is WhatsApp's pseudo-chat for Status/story updates.
 const statusBroadcastJID = "status@broadcast"
 
@@ -174,6 +204,11 @@ func isPseudoChat(jid string) bool {
 func (c *Client) ingestMessage(evt *events.Message) {
 	jid := evt.Info.Chat.String()
 	if isPseudoChat(jid) {
+		return
+	}
+	// Key distribution, history-sync notices and similar plumbing aren't
+	// messages: don't store them, count them as unread, or notify.
+	if isProtocolOnly(evt.Message) {
 		return
 	}
 
