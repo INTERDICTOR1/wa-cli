@@ -282,17 +282,26 @@ func (c *Client) ingestMessage(evt *events.Message) {
 		}
 	}
 
-	if !evt.Info.IsFromMe && c.notifyEnabled {
+	// Messages older than a couple of minutes are an offline backlog being
+	// delivered on reconnect, not new — don't pop one toast per message.
+	if !evt.Info.IsFromMe && c.notifyEnabled && time.Since(evt.Info.Timestamp) < 2*time.Minute {
+		ctx := context.Background()
 		shouldNotify := c.notifyGroups || !evt.Info.IsGroup
+		var chatName string
 		if shouldNotify && c.chats != nil {
-			if chat, ok, err := c.chats.Get(jid); err == nil && ok && chat.Muted {
-				shouldNotify = false
+			if chat, ok, err := c.chats.Get(jid); err == nil && ok {
+				shouldNotify = !chat.Muted
+				chatName = chat.Name
 			}
 		}
+		// Chats muted on the phone, synced by whatsmeow via app state.
+		if settings, err := c.WA.Store.ChatSettings.GetChatSettings(ctx, evt.Info.Chat); err == nil && settings.MutedUntil.After(time.Now()) {
+			shouldNotify = false
+		}
 		if shouldNotify {
-			title := evt.Info.PushName
-			if title == "" {
-				title = jid
+			title := c.ResolveName(ctx, evt.Info.Sender.String())
+			if evt.Info.IsGroup && chatName != "" {
+				title += " · " + chatName
 			}
 			body := "New message"
 			if c.notifyShowPreview {
@@ -305,9 +314,13 @@ func (c *Client) ingestMessage(evt *events.Message) {
 					body = text
 				}
 			}
-			if err := notify.Send(title, body); err != nil {
-				c.log.Warnf("desktop notification failed: %v", err)
-			}
+			// In the background: the OS toast call can be slow, and this
+			// runs on whatsmeow's event goroutine.
+			go func() {
+				if err := notify.Send(title, body); err != nil {
+					c.log.Warnf("desktop notification failed: %v", err)
+				}
+			}()
 		}
 	}
 }

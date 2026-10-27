@@ -20,6 +20,69 @@ func visibleLines(view string, height int) []string {
 	return lines
 }
 
+func typeKeys(m tea.Model, s string) tea.Model {
+	for _, r := range s {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	return m
+}
+
+func TestFilterOpenAndEsc(t *testing.T) {
+	var m tea.Model = newModel(nil, nil, nil, nil, nil)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = m.Update(chatsLoadedMsg{chats: []chatstore.Chat{
+		{JID: "1@s.whatsapp.net", Name: "Alice", LastMessageAt: 3},
+		{JID: "2@g.us", Name: "Jobs Group", IsGroup: true, LastMessageAt: 2},
+		{JID: "3@s.whatsapp.net", Name: "Bob", LastMessageAt: 1},
+	}})
+
+	// Moving the highlight must not open the chat.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.(model); got.selectedJID != "2@g.us" || got.openJID != "" {
+		t.Fatalf("after down: selected=%q open=%q", got.selectedJID, got.openJID)
+	}
+
+	// "j" filters (option 1: arrows only move), highlighting the first match.
+	m = typeKeys(m, "jo")
+	got := m.(model)
+	if got.filter != "jo" || len(got.visibleChats()) != 1 || got.selectedJID != "2@g.us" {
+		t.Fatalf("filter %q: visible=%d selected=%q", got.filter, len(got.visibleChats()), got.selectedJID)
+	}
+	if !strings.Contains(m.View(), "Find: jo") || strings.Contains(m.View(), "Alice") {
+		t.Fatalf("view doesn't show only the filtered list")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := m.(model); got.filter != "j" {
+		t.Fatalf("backspace: filter=%q", got.filter)
+	}
+	m = typeKeys(m, "ob")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if got := m.(model); got.filter != "" || len(got.visibleChats()) != 3 {
+		t.Fatalf("esc in list should clear filter, got %q", got.filter)
+	}
+
+	// Enter opens the highlighted chat, clears the filter, focuses input.
+	m = typeKeys(m, "bob")
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = m.(model)
+	if got.openJID != "3@s.whatsapp.net" || got.focus != focusInput || got.filter != "" || cmd == nil {
+		t.Fatalf("enter: open=%q focus=%d filter=%q cmd=%v", got.openJID, got.focus, got.filter, cmd != nil)
+	}
+
+	// Letters now go to the input box, not the filter.
+	m = typeKeys(m, "hi")
+	if got := m.(model); got.input.Value() != "hi" || got.filter != "" {
+		t.Fatalf("typing in input: value=%q filter=%q", got.input.Value(), got.filter)
+	}
+
+	// Esc returns to the list with the open chat highlighted.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if got := m.(model); got.focus != focusChatList || got.selectedJID != "3@s.whatsapp.net" {
+		t.Fatalf("esc from input: focus=%d selected=%q", got.focus, got.selectedJID)
+	}
+}
+
 func TestSelectionVisibleWithManyChats(t *testing.T) {
 	m := newModel(nil, nil, nil, nil, nil)
 	var updated tea.Model = m

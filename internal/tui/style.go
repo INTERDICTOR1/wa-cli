@@ -49,7 +49,4 @@ var (
 
 	statusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240"))
 )

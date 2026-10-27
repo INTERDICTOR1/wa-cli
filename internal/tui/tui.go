@@ -36,7 +36,7 @@ import (
 )
 
 // Run connects, launches the full-screen TUI, and blocks until the user
-// quits (Ctrl+C or q). Requires an existing login (`wa login`).
+// quits (Ctrl+C). Requires an existing login (`wa login`).
 func Run(a *app.App) error {
 	ctx := context.Background()
 
@@ -118,7 +118,9 @@ type model struct {
 	guard  *safety.Guard
 
 	chats       []chatstore.Chat
-	selectedJID string // "" means none selected yet
+	selectedJID string // highlighted in the chat list; "" means none yet
+	openJID     string // shown in the message pane; "" until Enter opens one
+	filter      string // typed in the chat list; narrows it by name
 
 	// names maps a 1:1 chat JID to whatsapp.Client.ResolveName's result.
 	names map[string]string
@@ -303,7 +305,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatsLoadedMsg:
-		wasEmpty := len(m.chats) == 0
 		m.chats = msg.chats
 		if m.statusLine == "Connecting..." {
 			m.statusLine = ""
@@ -311,14 +312,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedJID == "" && len(m.chats) > 0 {
 			m.selectedJID = m.chats[0].JID
 		}
-		var cmds []tea.Cmd
 		if missing := userChatJIDs(m.chats, m.names); len(missing) > 0 {
-			cmds = append(cmds, loadNamesCmd(m.ctx, m.client, missing))
+			return m, loadNamesCmd(m.ctx, m.client, missing)
 		}
-		if (wasEmpty || len(m.messages) == 0) && m.selectedJID != "" {
-			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID))
-		}
-		return m, tea.Batch(cmds...)
+		return m, nil
 
 	case namesLoadedMsg:
 		for jid, name := range msg.names {
@@ -338,8 +335,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshNamesMsg:
 		m.namesRefreshPending = false
 		cmds := []tea.Cmd{loadNamesCmd(m.ctx, m.client, userChatJIDs(m.chats, nil))}
-		if m.selectedJID != "" {
-			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID))
+		if m.openJID != "" {
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -348,7 +345,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case messagesLoadedMsg:
-		if msg.chatJID != m.selectedJID {
+		if msg.chatJID != m.openJID {
 			return m, nil // stale response for a chat we've since navigated away from
 		}
 		m.messages = msg.msgs
@@ -358,10 +355,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case incomingMsg:
 		cmds := []tea.Cmd{loadChatsCmd(m.cs)}
-		if msg.msg.ChatJID == m.selectedJID {
+		if msg.msg.ChatJID == m.openJID {
 			// Reload rather than append, so it gets the same rendering
 			// (names, mentions, reactions) as the rest of the chat.
-			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID))
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -389,47 +386,49 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	if msg.String() == "tab" {
-		if m.focus == focusChatList {
+	if m.focus == focusChatList {
+		switch msg.Type {
+		case tea.KeyUp:
+			m.moveSelection(-1)
+		case tea.KeyDown:
+			m.moveSelection(1)
+		case tea.KeyEnter:
+			if m.selectedJID == "" {
+				return m, nil
+			}
+			m.openJID = m.selectedJID
+			m.filter = ""
+			m.messages = nil
+			m.viewport.SetContent("")
 			m.focus = focusInput
 			m.input.Focus()
-		} else {
-			m.focus = focusChatList
-			m.input.Blur()
-		}
-		return m, nil
-	}
-
-	if m.focus == focusChatList {
-		switch msg.String() {
-		case "up", "k":
-			m.moveSelection(-1)
-			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID)
-		case "down", "j":
-			m.moveSelection(1)
-			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.selectedJID)
-		case "enter":
-			if m.selectedJID != "" {
-				m.focus = focusInput
-				m.input.Focus()
+			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID)
+		case tea.KeyEsc:
+			m.setFilter("")
+		case tea.KeyBackspace:
+			if r := []rune(m.filter); len(r) > 0 {
+				m.setFilter(string(r[:len(r)-1]))
 			}
-			return m, nil
-		case "q":
-			m.quitting = true
-			return m, tea.Quit
+		case tea.KeyRunes, tea.KeySpace:
+			m.setFilter(m.filter + string(msg.Runes))
 		}
 		return m, nil
 	}
 
 	// focusInput
-	switch msg.String() {
-	case "esc":
+	switch msg.Type {
+	case tea.KeyEsc:
 		m.focus = focusChatList
 		m.input.Blur()
+		m.selectedJID = m.openJID
 		return m, nil
-	case "enter":
+	case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+	case tea.KeyEnter:
 		text := strings.TrimSpace(m.input.Value())
-		if text == "" || m.selectedJID == "" {
+		if text == "" || m.openJID == "" {
 			return m, nil
 		}
 		m.input.SetValue("")
@@ -439,7 +438,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// actually failed.
 		m.messages = append(m.messages, displayMsg{
 			Message: msgstore.Message{
-				ChatJID:   m.selectedJID,
+				ChatJID:   m.openJID,
 				Text:      text,
 				FromMe:    true,
 				Timestamp: time.Now().UnixMilli(),
@@ -449,7 +448,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
 
-		return m, sendCmd(m.ctx, m.client, m.guard, m.selectedJID, text)
+		return m, sendCmd(m.ctx, m.client, m.guard, m.openJID, text)
 	}
 
 	var cmd tea.Cmd
@@ -457,27 +456,58 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// setFilter changes the chat-list filter and highlights the first match.
+func (m *model) setFilter(f string) {
+	m.filter = f
+	if visible := m.visibleChats(); len(visible) > 0 {
+		m.selectedJID = visible[0].JID
+	}
+}
+
+// visibleChats returns the chats whose displayed name contains the filter
+// (case-insensitive), in list order.
+func (m model) visibleChats() []chatstore.Chat {
+	if m.filter == "" {
+		return m.chats
+	}
+	q := strings.ToLower(m.filter)
+	var out []chatstore.Chat
+	for _, c := range m.chats {
+		if strings.Contains(strings.ToLower(m.chatName(c)), q) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// chatName is the name shown for c in the chat list.
+func (m model) chatName(c chatstore.Chat) string {
+	name := c.Name
+	if c.IsGroup && name == "" {
+		name = m.groupNames[c.JID]
+	} else if !c.IsGroup && m.names[c.JID] != "" {
+		name = m.names[c.JID]
+	}
+	if name == "" {
+		name = c.JID
+	}
+	return name
+}
+
 func (m *model) moveSelection(delta int) {
-	if len(m.chats) == 0 {
+	visible := m.visibleChats()
+	if len(visible) == 0 {
 		return
 	}
 	idx := 0
-	for i, c := range m.chats {
+	for i, c := range visible {
 		if c.JID == m.selectedJID {
 			idx = i
 			break
 		}
 	}
-	idx += delta
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(m.chats) {
-		idx = len(m.chats) - 1
-	}
-	m.selectedJID = m.chats[idx].JID
-	m.messages = nil
-	m.viewport.SetContent("")
+	idx = max(0, min(idx+delta, len(visible)-1))
+	m.selectedJID = visible[idx].JID
 }
 
 func (m *model) layout() {
@@ -486,9 +516,8 @@ func (m *model) layout() {
 		mainWidth = 10
 	}
 	inputHeight := 3
-	helpHeight := 1
 	statusHeight := 1
-	vpHeight := m.height - inputHeight - helpHeight - statusHeight - 2
+	vpHeight := m.height - inputHeight - statusHeight - 2
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
@@ -519,24 +548,25 @@ func (m model) View() string {
 		),
 	)
 
-	var footer []string
+	frame := body
 	if m.statusLine != "" {
-		footer = append(footer, statusStyle.Render(m.statusLine))
+		frame = lipgloss.JoinVertical(lipgloss.Left, body, statusStyle.Render(m.statusLine))
 	}
-	footer = append(footer, helpStyle.Render(
-		"↑/↓ navigate · enter open/send · tab switch focus · esc back · q/ctrl+c quit"))
-
-	frame := lipgloss.JoinVertical(lipgloss.Left, append([]string{body}, footer...)...)
 	dlog("view %d lines, terminal height %d", strings.Count(frame, "\n")+1, m.height)
 	return frame
 }
 
 func (m model) renderChatList() string {
 	var b strings.Builder
-	b.WriteString(chatListHeaderStyle.Render("Chats") + "\n\n")
+	header := "Chats"
+	if m.filter != "" {
+		header = "Find: " + m.filter
+	}
+	b.WriteString(chatListHeaderStyle.Render(ansi.Truncate(header, sidebarWidth-2, "…")) + "\n\n")
 
-	if len(m.chats) == 0 {
-		b.WriteString(chatItemStyle.Render("(none yet)"))
+	visible := m.visibleChats()
+	if len(visible) == 0 {
+		b.WriteString(chatItemStyle.Render("(none)"))
 	}
 
 	// Only draw the chats that fit: a frame taller than the terminal gets
@@ -544,24 +574,16 @@ func (m model) renderChatList() string {
 	height := m.viewport.Height + 3
 	rows := height - 2 // minus header and blank line
 	start := 0
-	for i, c := range m.chats {
+	for i, c := range visible {
 		if c.JID == m.selectedJID && i >= rows {
 			start = i - rows + 1
 			break
 		}
 	}
-	end := min(start+rows, len(m.chats))
+	end := min(start+rows, len(visible))
 
-	for _, c := range m.chats[start:end] {
-		name := c.Name
-		if c.IsGroup && name == "" {
-			name = m.groupNames[c.JID]
-		} else if !c.IsGroup && m.names[c.JID] != "" {
-			name = m.names[c.JID]
-		}
-		if name == "" {
-			name = c.JID
-		}
+	for _, c := range visible[start:end] {
+		name := m.chatName(c)
 
 		// Truncate by display width so each chat stays on one line (a
 		// wrapped label would grow the sidebar past the terminal again).
@@ -585,8 +607,8 @@ func (m model) renderChatList() string {
 }
 
 func (m model) renderMessages() string {
-	if m.selectedJID == "" {
-		return "No chats yet. They'll appear here once synced (try 'wa chat list' in another terminal) or as messages arrive."
+	if m.openJID == "" {
+		return "Pick a chat and press Enter."
 	}
 	if len(m.messages) == 0 {
 		return "No local history for this chat yet."
