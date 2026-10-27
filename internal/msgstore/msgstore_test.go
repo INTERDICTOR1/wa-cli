@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-func TestAppend_KeepsLast24HoursBeyondMax(t *testing.T) {
+func TestAppend_KeepsRetainForBeyondMax(t *testing.T) {
 	s := New(t.TempDir())
 	jid := "g@g.us"
 	now := time.Now()
-	// 10 old messages, then MaxPerChat+20 from the last hour.
+	// 10 messages older than RetainFor, then MaxPerChat+20 from the last hour.
 	for i := 0; i < 10; i++ {
-		_ = s.Append(Message{ID: fmt.Sprint("old", i), ChatJID: jid, Timestamp: now.Add(-48 * time.Hour).UnixMilli()})
+		_ = s.Append(Message{ID: fmt.Sprint("old", i), ChatJID: jid, Timestamp: now.Add(-RetainFor - time.Hour).UnixMilli()})
 	}
 	for i := 0; i < MaxPerChat+20; i++ {
 		_ = s.Append(Message{ID: fmt.Sprint("new", i), ChatJID: jid, Timestamp: now.Add(-time.Hour).UnixMilli() + int64(i)})

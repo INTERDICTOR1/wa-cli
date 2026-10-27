@@ -23,7 +23,7 @@ import (
 const MaxPerChat = 50
 
 // RetainFor is how far back every message is kept, even beyond MaxPerChat.
-const RetainFor = 24 * time.Hour
+const RetainFor = 48 * time.Hour
 
 // Message is one stored message.
 type Message struct {
