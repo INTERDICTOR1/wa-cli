@@ -831,9 +831,24 @@ func (c *Client) Disconnect() {
 // message's ID (for later reply/forward reference). Callers should call
 // Connect() first.
 func (c *Client) SendText(ctx context.Context, jid types.JID, text string) (string, error) {
-	msg := &waProto.Message{
-		Conversation: proto.String(text),
+	return c.SendMessage(ctx, jid, TextMessage(text, nil))
+}
+
+// TextMessage builds a text message. When it @mentions anyone it's an
+// ExtendedTextMessage listing them in ContextInfo.MentionedJID; each must
+// appear in text as "@" followed by its JID's user part.
+func TextMessage(text string, mentioned []string) *waProto.Message {
+	if len(mentioned) == 0 {
+		return &waProto.Message{Conversation: proto.String(text)}
 	}
+	return &waProto.Message{ExtendedTextMessage: &waProto.ExtendedTextMessage{
+		Text:        proto.String(text),
+		ContextInfo: &waProto.ContextInfo{MentionedJID: mentioned},
+	}}
+}
+
+// SendMessage sends msg to jid and returns the sent message's ID.
+func (c *Client) SendMessage(ctx context.Context, jid types.JID, msg *waProto.Message) (string, error) {
 	var resp whatsmeow.SendResponse
 	err := withRetry(func() error {
 		var sendErr error

@@ -26,7 +26,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -146,6 +145,18 @@ type model struct {
 	// its second half arrives (see joinSurrogates).
 	pendingHigh rune
 	previews    *previewCache
+
+	// @mention state for the open group (see mention.go). Members load on
+	// the first "@" typed in a group and are dropped when another chat
+	// opens, so only one group's member list is ever in memory.
+	members          []member
+	membersFor       string // group whose members are loaded or loading
+	membersLoading   bool
+	mentionOpen      bool // cursor is in an "@..." query
+	suggestions      []member
+	suggestIdx       int
+	suggestDismissed string // input value when Esc closed the dropdown
+	mentions         []mention
 	// groupNames maps a group JID to its real name, fetched via
 	// ListGroups since chatstore's own name field for groups only ever
 	// comes from HistorySync, which isn't reliable.
@@ -322,20 +333,21 @@ func loadMessagesCmd(ctx context.Context, client *whatsapp.Client, cs *chatstore
 	}
 }
 
-func sendCmd(ctx context.Context, client *whatsapp.Client, ms *msgstore.Store, guard *safety.Guard, jidStr, text string) tea.Cmd {
+func sendCmd(ctx context.Context, client *whatsapp.Client, ms *msgstore.Store, guard *safety.Guard, jidStr, text string, mentioned []string) tea.Cmd {
 	return func() tea.Msg {
 		jid, err := types.ParseJID(jidStr)
 		if err != nil {
 			return sendResultMsg{err: err}
 		}
-		id, err := client.SendText(ctx, jid, text)
+		msg := whatsapp.TextMessage(text, mentioned)
+		id, err := client.SendMessage(ctx, jid, msg)
 		if err != nil {
 			return sendResultMsg{err: err}
 		}
 		// WhatsApp doesn't echo this device's own sends back as events, so
 		// save it here (as `wa chat send` does) or it vanishes from history.
 		var raw string
-		if b, err := proto.Marshal(&waProto.Message{Conversation: proto.String(text)}); err == nil {
+		if b, err := proto.Marshal(msg); err == nil {
 			raw = base64.StdEncoding.EncodeToString(b)
 		}
 		if err := ms.Append(msgstore.Message{
@@ -410,6 +422,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// mapping, so names can resolve. Only safe once connected.
 		return m, loadGroupsCmd(m.ctx, m.client)
 
+	case membersLoadedMsg:
+		if msg.groupJID == m.membersFor {
+			m.members, m.membersLoading = msg.members, false
+			return m, m.updateSuggestions()
+		}
+		return m, nil
+
 	case groupsLoadedMsg:
 		m.groupNames = msg.names
 		return m, func() tea.Msg { return namesChangedMsg{} }
@@ -456,6 +475,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.statusLine = msg.err.Error()
+		m.membersLoading = false
 		return m, nil
 
 	case tea.KeyMsg:
@@ -489,6 +509,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedJID == "" {
 				return m, nil
 			}
+			if m.selectedJID != m.openJID {
+				m.resetMentions()
+			}
 			m.openJID = m.selectedJID
 			m.filter = ""
 			m.focus = focusInput
@@ -510,7 +533,25 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.preview()
 	}
 
-	// focusInput
+	// focusInput — the @mention dropdown, when showing, takes these keys.
+	if len(m.suggestions) > 0 {
+		switch msg.Type {
+		case tea.KeyUp:
+			m.suggestIdx = max(0, m.suggestIdx-1)
+			return m, nil
+		case tea.KeyDown:
+			m.suggestIdx = min(len(m.suggestions)-1, m.suggestIdx+1)
+			return m, nil
+		case tea.KeyTab, tea.KeyEnter:
+			m.acceptSuggestion()
+			return m, nil
+		case tea.KeyEsc:
+			m.suggestions = nil
+			m.suggestDismissed = m.input.Value()
+			return m, nil
+		}
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc, tea.KeyTab:
 		m.focus = focusChatList
@@ -527,6 +568,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.SetValue("")
+		wireText, mentioned := applyMentions(text, m.mentions)
+		m.mentions = nil
 
 		// Show it immediately rather than waiting for the send to
 		// round-trip — sendResultMsg corrects the status line if it
@@ -543,12 +586,76 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
 
-		return m, sendCmd(m.ctx, m.client, m.ms, m.guard, m.openJID, text)
+		return m, sendCmd(m.ctx, m.client, m.ms, m.guard, m.openJID, wireText, mentioned)
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	return m, cmd
+	return m, tea.Batch(cmd, m.updateSuggestions())
+}
+
+// resetMentions drops all @mention state; called when another chat opens.
+func (m *model) resetMentions() {
+	m.members, m.membersFor, m.membersLoading = nil, "", false
+	m.mentionOpen, m.suggestions, m.suggestIdx = false, nil, 0
+	m.suggestDismissed, m.mentions = "", nil
+}
+
+// updateSuggestions refreshes the @mention dropdown for the text before
+// the cursor, starting the member load on the first "@" in a group.
+func (m *model) updateSuggestions() tea.Cmd {
+	m.suggestions, m.mentionOpen = nil, false
+	value := m.input.Value()
+	q, start, ok := mentionQuery(value, m.input.Position())
+	if !ok || !strings.HasSuffix(m.openJID, "@g.us") || value == m.suggestDismissed {
+		return nil
+	}
+	for _, picked := range m.mentions {
+		if strings.HasPrefix(string([]rune(value)[start:]), "@"+picked.name) {
+			return nil // cursor is just after a mention already picked
+		}
+	}
+	m.mentionOpen = true
+	if m.membersFor != m.openJID {
+		m.membersFor, m.membersLoading = m.openJID, true
+		return loadMembersCmd(m.ctx, m.client, m.openJID)
+	}
+	m.suggestions = matchMembers(m.members, q)
+	m.suggestIdx = min(m.suggestIdx, max(0, len(m.suggestions)-1))
+	return nil
+}
+
+// acceptSuggestion replaces the "@query" before the cursor with the
+// highlighted member's "@Name ".
+func (m *model) acceptSuggestion() {
+	pick := m.suggestions[m.suggestIdx]
+	value, pos := []rune(m.input.Value()), m.input.Position()
+	_, start, _ := mentionQuery(string(value), pos)
+	insert := []rune("@" + pick.name + " ")
+	m.input.SetValue(string(value[:start]) + string(insert) + string(value[pos:]))
+	m.input.SetCursor(start + len(insert))
+	m.mentions = append(m.mentions, mention{name: pick.name, jid: pick.jid})
+	m.suggestions, m.suggestIdx, m.mentionOpen = nil, 0, false
+}
+
+// renderSuggestions draws the @mention dropdown, or "" when it's closed.
+func (m model) renderSuggestions() string {
+	if m.focus != focusInput || !m.mentionOpen {
+		return ""
+	}
+	if m.membersLoading {
+		return chatItemStyle.Render("  loading group members…")
+	}
+	lines := make([]string, len(m.suggestions))
+	for i, s := range m.suggestions {
+		label := ansi.Truncate(s.name, m.viewport.Width-4, "…")
+		if i == m.suggestIdx {
+			lines[i] = selectedChatStyle.Render("› " + label)
+		} else {
+			lines[i] = chatItemStyle.Render("  " + label)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // preview shows the highlighted chat in the message pane, without marking
@@ -557,6 +664,7 @@ func (m *model) preview() tea.Cmd {
 	if m.selectedJID == "" || m.selectedJID == m.openJID {
 		return nil
 	}
+	m.resetMentions()
 	m.openJID = m.selectedJID
 	m.messages = nil
 	m.viewport.SetContent("")
@@ -671,12 +779,25 @@ func (m model) View() string {
 		return "Loading wa-cli...\n"
 	}
 
+	// The @mention dropdown sits above the input; the message pane gives
+	// up that many lines (scrolled so its newest lines stay visible).
+	vp := m.viewport
+	right := []string{}
+	if dropdown := m.renderSuggestions(); dropdown != "" {
+		n := strings.Count(dropdown, "\n") + 1
+		if vp.Height > n {
+			vp.Height -= n
+			vp.SetYOffset(vp.YOffset + n)
+		}
+		right = append(right, vp.View(), dropdown)
+	} else {
+		right = append(right, vp.View())
+	}
+	right = append(right, m.renderInputBar())
+
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		m.renderChatList(),
-		lipgloss.JoinVertical(lipgloss.Left,
-			m.viewport.View(),
-			m.renderInputBar(),
-		),
+		lipgloss.JoinVertical(lipgloss.Left, right...),
 	)
 
 	var footer []string
