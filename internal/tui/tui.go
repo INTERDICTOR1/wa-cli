@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
@@ -483,7 +484,20 @@ func (m model) renderChatList() string {
 		b.WriteString(chatItemStyle.Render("(none yet)"))
 	}
 
-	for _, c := range m.chats {
+	// Only draw the chats that fit: a frame taller than the terminal gets
+	// its top cut off by Bubble Tea, hiding the selection and input box.
+	height := m.viewport.Height + 3
+	rows := height - 2 // minus header and blank line
+	start := 0
+	for i, c := range m.chats {
+		if c.JID == m.selectedJID && i >= rows {
+			start = i - rows + 1
+			break
+		}
+	}
+	end := min(start+rows, len(m.chats))
+
+	for _, c := range m.chats[start:end] {
 		name := c.Name
 		if name == "" && c.IsGroup {
 			name = m.groupNames[c.JID]
@@ -491,14 +505,14 @@ func (m model) renderChatList() string {
 		if name == "" {
 			name = c.JID
 		}
-		if len(name) > 20 {
-			name = name[:20] + "…"
-		}
 
-		label := name
+		// Truncate by display width so each chat stays on one line (a
+		// wrapped label would grow the sidebar past the terminal again).
+		suffix := ""
 		if c.UnreadCount > 0 {
-			label = fmt.Sprintf("%s (%d)", name, c.UnreadCount)
+			suffix = fmt.Sprintf(" (%d)", c.UnreadCount)
 		}
+		label := ansi.Truncate(name, sidebarWidth-4-ansi.StringWidth(suffix), "…") + suffix
 
 		switch {
 		case c.JID == m.selectedJID:
@@ -510,7 +524,6 @@ func (m model) renderChatList() string {
 		}
 	}
 
-	height := m.viewport.Height + 3
 	return sidebarStyle.Width(sidebarWidth).Height(height).Render(b.String())
 }
 
