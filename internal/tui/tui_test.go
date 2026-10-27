@@ -36,10 +36,20 @@ func TestFilterOpenAndEsc(t *testing.T) {
 		{JID: "3@s.whatsapp.net", Name: "Bob", LastMessageAt: 1},
 	}})
 
-	// Moving the highlight must not open the chat.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if got := m.(model); got.selectedJID != "2@g.us" || got.openJID != "" {
-		t.Fatalf("after down: selected=%q open=%q", got.selectedJID, got.openJID)
+	// Moving the highlight previews the chat but keeps focus on the list.
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.(model); got.selectedJID != "2@g.us" || got.openJID != "2@g.us" || got.focus != focusChatList || cmd == nil {
+		t.Fatalf("after down: selected=%q open=%q focus=%d", got.selectedJID, got.openJID, got.focus)
+	}
+
+	// Tab switches focus to the input and back.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.(model); got.focus != focusInput || got.openJID != "2@g.us" {
+		t.Fatalf("tab from list: focus=%d open=%q", got.focus, got.openJID)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.(model); got.focus != focusChatList {
+		t.Fatalf("tab from input: focus=%d", got.focus)
 	}
 
 	// "j" filters (option 1: arrows only move), highlighting the first match.
@@ -64,7 +74,7 @@ func TestFilterOpenAndEsc(t *testing.T) {
 
 	// Enter opens the highlighted chat, clears the filter, focuses input.
 	m = typeKeys(m, "bob")
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	got = m.(model)
 	if got.openJID != "3@s.whatsapp.net" || got.focus != focusInput || got.filter != "" || cmd == nil {
 		t.Fatalf("enter: open=%q focus=%d filter=%q cmd=%v", got.openJID, got.focus, got.filter, cmd != nil)

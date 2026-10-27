@@ -253,9 +253,14 @@ func loadChatsCmd(cs *chatstore.Store) tea.Cmd {
 	}
 }
 
-func loadMessagesCmd(ctx context.Context, client *whatsapp.Client, cs *chatstore.Store, ms *msgstore.Store, chatJID string) tea.Cmd {
+// loadMessagesCmd loads chatJID's messages for display. markRead is false
+// for a preview (just moving the highlight) so browsing doesn't clear
+// unread counts.
+func loadMessagesCmd(ctx context.Context, client *whatsapp.Client, cs *chatstore.Store, ms *msgstore.Store, chatJID string, markRead bool) tea.Cmd {
 	return func() tea.Msg {
-		_ = cs.MarkRead(chatJID) // opening a chat marks it read, same as `wa chat open`
+		if markRead {
+			_ = cs.MarkRead(chatJID)
+		}
 		msgs, err := ms.List(chatJID)
 		if err != nil {
 			return errMsg{err}
@@ -312,10 +317,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedJID == "" && len(m.chats) > 0 {
 			m.selectedJID = m.chats[0].JID
 		}
+		cmds := []tea.Cmd{m.preview()}
 		if missing := userChatJIDs(m.chats, m.names); len(missing) > 0 {
-			return m, loadNamesCmd(m.ctx, m.client, missing)
+			cmds = append(cmds, loadNamesCmd(m.ctx, m.client, missing))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 
 	case namesLoadedMsg:
 		for jid, name := range msg.names {
@@ -336,7 +342,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.namesRefreshPending = false
 		cmds := []tea.Cmd{loadNamesCmd(m.ctx, m.client, userChatJIDs(m.chats, nil))}
 		if m.openJID != "" {
-			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID))
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, m.focus == focusInput))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -358,7 +364,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.msg.ChatJID == m.openJID {
 			// Reload rather than append, so it gets the same rendering
 			// (names, mentions, reactions) as the rest of the chat.
-			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID))
+			cmds = append(cmds, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, m.focus == focusInput))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -392,17 +398,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSelection(-1)
 		case tea.KeyDown:
 			m.moveSelection(1)
-		case tea.KeyEnter:
+		case tea.KeyEnter, tea.KeyTab:
 			if m.selectedJID == "" {
 				return m, nil
 			}
 			m.openJID = m.selectedJID
 			m.filter = ""
-			m.messages = nil
-			m.viewport.SetContent("")
 			m.focus = focusInput
 			m.input.Focus()
-			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID)
+			return m, loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, true)
 		case tea.KeyEsc:
 			m.setFilter("")
 		case tea.KeyBackspace:
@@ -412,12 +416,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyRunes, tea.KeySpace:
 			m.setFilter(m.filter + string(msg.Runes))
 		}
-		return m, nil
+		return m, m.preview()
 	}
 
 	// focusInput
 	switch msg.Type {
-	case tea.KeyEsc:
+	case tea.KeyEsc, tea.KeyTab:
 		m.focus = focusChatList
 		m.input.Blur()
 		m.selectedJID = m.openJID
@@ -454,6 +458,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+// preview shows the highlighted chat in the message pane, without marking
+// it read. No-op if it's already shown.
+func (m *model) preview() tea.Cmd {
+	if m.selectedJID == "" || m.selectedJID == m.openJID {
+		return nil
+	}
+	m.openJID = m.selectedJID
+	m.messages = nil
+	m.viewport.SetContent("")
+	return loadMessagesCmd(m.ctx, m.client, m.cs, m.ms, m.openJID, false)
 }
 
 // setFilter changes the chat-list filter and highlights the first match.
@@ -516,8 +532,9 @@ func (m *model) layout() {
 		mainWidth = 10
 	}
 	inputHeight := 3
+	helpHeight := 1
 	statusHeight := 1
-	vpHeight := m.height - inputHeight - statusHeight - 2
+	vpHeight := m.height - inputHeight - helpHeight - statusHeight - 2
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
@@ -548,10 +565,14 @@ func (m model) View() string {
 		),
 	)
 
-	frame := body
+	var footer []string
 	if m.statusLine != "" {
-		frame = lipgloss.JoinVertical(lipgloss.Left, body, statusStyle.Render(m.statusLine))
+		footer = append(footer, statusStyle.Render(m.statusLine))
 	}
+	footer = append(footer, helpStyle.Render(
+		"type to filter · ↑/↓ move · enter open/send · tab switch focus · esc back · ctrl+c quit"))
+
+	frame := lipgloss.JoinVertical(lipgloss.Left, append([]string{body}, footer...)...)
 	dlog("view %d lines, terminal height %d", strings.Count(frame, "\n")+1, m.height)
 	return frame
 }
