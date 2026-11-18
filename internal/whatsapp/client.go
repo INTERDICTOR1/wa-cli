@@ -1,31 +1,42 @@
 // Package whatsapp wraps go.mau.fi/whatsmeow with a smaller,
-// wa-cli-shaped API (Client.ListChats, SendImage, GroupInfo, and so on)
-// rather than leaking whatsmeow's types everywhere. This is the one
-// package that talks to WhatsApp's servers; everything under cmd/ goes
-// through it rather than importing whatsmeow directly.
+// wa-cli-shaped API rather than leaking whatsmeow's types everywhere.
+// This is the one package that talks to WhatsApp's servers; everything
+// under cmd/ and the TUI go through it rather than importing whatsmeow
+// directly.
 //
-// Client wires together three separate local stores (see
-// internal/store, internal/chatstore, internal/msgstore) plus optional
-// desktop notifications (internal/notify) — see ARCHITECTURE.md for how
-// they fit together and why they're kept separate.
+// Client keeps the local chat and message stores (internal/chatstore,
+// internal/msgstore) current from WhatsApp's events and turns them into
+// the views the TUI draws; api.go is its contract with the TUI. The
+// files are split by concern:
+//
+//	client.go   construction, lifecycle, the CLI's group/contact calls
+//	events.go   whatsmeow events: receipts, presence, chat settings, ...
+//	ingest.go   storing live messages and history syncs, notifications
+//	fold.go     reactions/edits/deletes/votes/HD copies -> their message
+//	content.go  what each WhatsApp message type is and how it reads
+//	view.go     ChatView / MessageView for the TUI
+//	send.go     sending, reacting, editing, deleting, forwarding
+//	sendfile.go choosing how to send a file and preparing images
+//	media.go    thumbnails and saving attachments
+//	chatstate.go read state, pin/archive/mute, presence, older history
+//	jid.go      one chat per person: phone-number vs @lid addresses
+//	names.go    display names
 package whatsapp
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/codebyoketch/wa-cli/internal/chatstore"
 	waerrors "github.com/codebyoketch/wa-cli/internal/errors"
@@ -35,16 +46,15 @@ import (
 	"github.com/codebyoketch/wa-cli/internal/safety"
 )
 
-// Client is wa-cli's WhatsApp client: a thin, higher-level wrapper
-// around a *whatsmeow.Client (exported as WA) plus the local
-// chatstore/msgstore state and notification settings needed to serve
-// wa-cli's commands and TUI. Construct one with New.
+// Client is wa-cli's WhatsApp client: a higher-level wrapper around a
+// *whatsmeow.Client (exported as WA) plus the local chatstore/msgstore
+// state and notification settings needed to serve wa-cli's commands and
+// TUI. Construct one with New. All methods are safe for concurrent use.
 type Client struct {
-	WA         *whatsmeow.Client
-	log        waLog.Logger
-	chats      *chatstore.Store
-	msgs       *msgstore.Store
-	onIncoming func(msgstore.Message)
+	WA    *whatsmeow.Client
+	log   waLog.Logger
+	chats *chatstore.Store
+	msgs  *msgstore.Store
 
 	// Desktop notifications are opt-in (default off) — only wa watch
 	// and the TUI call SetNotifications to enable them. Without this,
@@ -54,11 +64,55 @@ type Client struct {
 	notifyEnabled     bool
 	notifyGroups      bool
 	notifyShowPreview bool
+
+	// evMu guards the event handlers and behavior.
+	evMu       sync.RWMutex
+	onEvent    func(Event)
+	onIncoming func(msgstore.Message)
+	behavior   Behavior
+	wantOnline bool
+
+	// foldMu serializes the read-then-write steps of ingesting a message.
+	foldMu sync.Mutex
+
+	nameMu    sync.Mutex
+	nameCache map[string]nameEntry
+	nameGen   uint64 // bumped on every invalidation
+
+	namesMu      sync.Mutex
+	namesLast    time.Time
+	namesPending bool
+
+	mergeMu    sync.Mutex
+	mergedLIDs map[string]struct{}
+
+	// groupMu guards the group member cache.
+	groupMu      sync.Mutex
+	groupMembers map[string][]memberRef
+	groupsLoaded time.Time
+	groupsBusy   bool
+
+	// sendMu guards the bookkeeping of outgoing messages.
+	sendMu       sync.Mutex
+	pendingFiles map[string]Outgoing // message ID -> what to upload again on Retry
+	lastRead     map[string]string   // chat -> newest message a read receipt went out for
+
+	// Test seams: stand-ins for the parts of whatsmeow the local logic
+	// reads. Nil means "use WA".
+	lidOverride     lidSource
+	contactOverride contactSource
+	decryptOverride secretDecrypter
+	selfJID         types.JID
+	selfLID         types.JID
+	notifyFn        func(title, body string) error
 }
 
 // New builds a Client using the first (or a fresh, unpaired) device from
 // container. chats/msgs may be nil for commands that don't need chat or
 // message history (e.g. login/logout/status).
+//
+// For the TUI: call OnEvent, SetBehavior and SetNotifications, then
+// Start; Stop when done.
 func New(ctx context.Context, container *sqlstore.Container, log waLog.Logger, chats *chatstore.Store, msgs *msgstore.Store) (*Client, error) {
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
@@ -66,7 +120,7 @@ func New(ctx context.Context, container *sqlstore.Container, log waLog.Logger, c
 	}
 	clientLog := newQuietLogger(waLog.Stdout("Client", "WARN", true))
 	waClient := whatsmeow.NewClient(device, clientLog)
-	c := &Client{WA: waClient, log: log, chats: chats, msgs: msgs}
+	c := &Client{WA: waClient, log: log, chats: chats, msgs: msgs, wantOnline: true}
 
 	if chats != nil || msgs != nil {
 		waClient.AddEventHandler(c.handleEvent)
@@ -75,13 +129,64 @@ func New(ctx context.Context, container *sqlstore.Container, log waLog.Logger, c
 	return c, nil
 }
 
-// OnIncomingMessage registers fn to be called for every incoming message,
-// after it's been ingested into chatstore/msgstore. Lets callers with
-// their own event loop (like the TUI) bridge live updates in without
-// duplicating ingestion logic. Only one callback is supported; a second
-// call replaces the first.
+// OnEvent registers the single handler told about everything the TUI
+// should react to (see Event). It is called from background goroutines,
+// possibly several at once: the handler must be quick and safe for
+// concurrent use. A second call replaces the first.
+func (c *Client) OnEvent(fn func(Event)) {
+	c.evMu.Lock()
+	c.onEvent = fn
+	c.evMu.Unlock()
+}
+
+// emit delivers e to the registered handler, if any.
+func (c *Client) emit(e Event) {
+	c.evMu.RLock()
+	fn := c.onEvent
+	c.evMu.RUnlock()
+	if fn != nil {
+		fn(e)
+	}
+}
+
+// SetBehavior sets the user's privacy-affecting choices. The zero value
+// (what a new Client has) sends neither read receipts nor presence.
+func (c *Client) SetBehavior(b Behavior) {
+	c.evMu.Lock()
+	old := c.behavior
+	c.behavior = b
+	online := c.wantOnline
+	c.evMu.Unlock()
+
+	if old.SendPresence == b.SendPresence || !c.connected() {
+		return
+	}
+	// Presence was switched while connected: show or hide you right away.
+	state := types.PresenceUnavailable
+	if b.SendPresence && online {
+		state = types.PresenceAvailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.WA.SendPresence(ctx, state); err != nil && !errors.Is(err, whatsmeow.ErrNoPushName) {
+		c.log.Warnf("updating presence failed: %v", err)
+	}
+}
+
+func (c *Client) getBehavior() Behavior {
+	c.evMu.RLock()
+	defer c.evMu.RUnlock()
+	return c.behavior
+}
+
+// OnIncomingMessage registers fn to be called for every new message
+// stored from a live event. Superseded by OnEvent; kept for callers that
+// only want new messages. Only one callback is supported; a second call
+// replaces the first.
 func (c *Client) OnIncomingMessage(fn func(msgstore.Message)) {
+	c.evMu.Lock()
 	c.onIncoming = fn
+	c.evMu.Unlock()
 }
 
 // SetNotifications turns on desktop notifications for incoming messages.
@@ -89,157 +194,86 @@ func (c *Client) OnIncomingMessage(fn func(msgstore.Message)) {
 // why this needs to be explicit rather than inferred from chats/msgs
 // being present.
 func (c *Client) SetNotifications(enabled, groups, showPreview bool) {
+	c.evMu.Lock()
 	c.notifyEnabled = enabled
 	c.notifyGroups = groups
 	c.notifyShowPreview = showPreview
+	c.evMu.Unlock()
 }
 
-func (c *Client) handleEvent(evt interface{}) {
-	switch v := evt.(type) {
-	case *events.HistorySync:
-		if c.chats != nil {
-			c.ingestHistorySync(v)
-		}
-	case *events.Message:
-		c.ingestMessage(v)
+// sendNotification shows a desktop notification in the background: the
+// OS toast call can be slow, and callers run on whatsmeow's goroutines.
+func (c *Client) sendNotification(title, body string) {
+	fn := c.notifyFn
+	if fn == nil {
+		fn = notify.Send
 	}
-}
-
-// ingestHistorySync populates chatstore from WhatsApp's initial (or
-// on-demand) history sync payload, sent shortly after a fresh pairing or
-// reconnect.
-func (c *Client) ingestHistorySync(evt *events.HistorySync) {
-	if evt.Data == nil {
-		return
-	}
-	// Keep message bodies from the last msgstore.RetainFor; an on-demand
-	// sync is a backfill we asked for, so keep all of it.
-	cutoff := time.Now().Add(-msgstore.RetainFor)
-	if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
-		cutoff = time.Time{}
-	}
-	var toStore []msgstore.Message
-	defer func() {
-		if c.msgs != nil {
-			if err := c.msgs.AppendMany(toStore); err != nil {
-				c.log.Warnf("msgstore history append failed: %v", err)
-			}
+	go func() {
+		if err := fn(title, body); err != nil {
+			c.log.Warnf("desktop notification failed: %v", err)
 		}
 	}()
-
-	for _, conv := range evt.Data.GetConversations() {
-		jid := conv.GetID()
-		if jid == "" || isPseudoChat(jid) {
-			continue
-		}
-
-		name := conv.GetName()
-		msgs := conv.GetMessages()
-		c.storeHistoryPushNames(jid, msgs)
-		toStore = append(toStore, c.historyMessages(jid, msgs, cutoff)...)
-
-		// Skip pure noise: no name and no message history at all. These
-		// show up as bare @lid conversation stubs (e.g. group members
-		// using WhatsApp's privacy-ID feature) that aren't real chats
-		// worth surfacing in `wa chat list`.
-		if name == "" && len(msgs) == 0 {
-			continue
-		}
-
-		// History lists messages newest first, so take the maximum rather
-		// than trusting either end, and also consider the conversation's
-		// own timestamps (what WhatsApp itself sorts chats by).
-		var newest uint64
-		var preview string
-		for _, hm := range msgs {
-			if ts := hm.GetMessage().GetMessageTimestamp(); ts > newest {
-				newest = ts
-				preview = extractPreview(hm.GetMessage().GetMessage())
-			}
-		}
-		newest = max(newest, conv.GetLastMsgTimestamp(), conv.GetConversationTimestamp())
-		lastAt := int64(newest) * 1000
-
-		err := c.chats.Upsert(chatstore.Chat{
-			JID:                jid,
-			Name:               name,
-			IsGroup:            strings.HasSuffix(jid, "@g.us"),
-			LastMessageAt:      lastAt,
-			LastMessagePreview: preview,
-			UnreadCount:        int(conv.GetUnreadCount()),
-		})
-		if err != nil {
-			c.log.Warnf("chatstore upsert failed for %s: %v", jid, err)
-		}
-	}
 }
 
-// historyMessages converts a history-sync conversation's messages newer
-// than cutoff into stored messages, the same way live ones are stored.
-func (c *Client) historyMessages(chatJID string, msgs []*waHistorySync.HistorySyncMsg, cutoff time.Time) []msgstore.Message {
-	chat, err := types.ParseJID(chatJID)
-	if err != nil {
-		return nil
-	}
-	var out []msgstore.Message
-	for _, hm := range msgs {
-		wmi := hm.GetMessage()
-		if time.Unix(int64(wmi.GetMessageTimestamp()), 0).Before(cutoff) {
-			continue
-		}
-		evt, err := c.WA.ParseWebMessage(chat, wmi)
-		if err != nil || isProtocolOnly(evt.Message) {
-			continue
-		}
-		out = append(out, storedMessage(evt))
-	}
-	return out
+// connected reports whether there is a live, authenticated connection.
+func (c *Client) connected() bool {
+	return c.WA != nil && c.WA.IsConnected() && c.WA.IsLoggedIn()
 }
 
-// RequestOlderMessages asks your phone for up to count messages sent
-// before oldest (the oldest one stored for its chat). The phone answers
-// later with an on-demand history sync, which ingestHistorySync stores.
-// Needs the phone to be online.
-func (c *Client) RequestOlderMessages(ctx context.Context, oldest msgstore.Message, count int) error {
-	chat, err := types.ParseJID(oldest.ChatJID)
-	if err != nil {
+// Start prepares the local stores and connects, for a long-running
+// session such as the TUI. It first runs the local maintenance (folding
+// rows imported from the old store, merging chats stored under a
+// person's two addresses, mirroring the phone's pin/archive/mute state),
+// then connects; whatsmeow reconnects by itself from then on, including
+// when the network is down at startup. Progress arrives as ConnEvents.
+// The connection is closed when ctx is cancelled or Stop is called.
+func (c *Client) Start(ctx context.Context) error {
+	if !c.IsLoggedIn() {
+		return waerrors.ErrNotLoggedIn
+	}
+	c.Maintain(ctx)
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	req := c.WA.BuildHistorySyncRequest(&types.MessageInfo{
-		MessageSource: types.MessageSource{Chat: chat, IsFromMe: oldest.FromMe},
-		ID:            oldest.ID,
-		Timestamp:     time.UnixMilli(oldest.Timestamp),
-	}, count)
-	_, err = c.WA.SendPeerMessage(ctx, req)
-	return err
+
+	c.emit(ConnEvent{State: ConnConnecting})
+	c.WA.InitialAutoReconnect = true
+	if err := c.WA.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+		return waerrors.Wrap(err, "connecting to WhatsApp")
+	}
+	go func() {
+		<-ctx.Done()
+		c.Stop()
+	}()
+	return nil
 }
 
-// storeHistoryPushNames saves the sender push name carried on each
-// history-sync message into whatsmeow's contact store. whatsmeow only does
-// this itself for live messages and the separate push-name sync, so
-// without it most people you haven't saved stay nameless.
-func (c *Client) storeHistoryPushNames(chatJID string, msgs []*waHistorySync.HistorySyncMsg) {
-	ctx := context.Background()
-	for _, hm := range msgs {
-		wmi := hm.GetMessage()
-		push := wmi.GetPushName()
-		if push == "" || wmi.GetKey().GetFromMe() {
-			continue
-		}
-		sender := chatJID
-		if p := wmi.GetParticipant(); p != "" {
-			sender = p
-		} else if p := wmi.GetKey().GetParticipant(); p != "" {
-			sender = p
-		}
-		jid, err := types.ParseJID(sender)
-		if err != nil || jid.Server == types.GroupServer {
-			continue
-		}
-		if _, _, err := c.WA.Store.Contacts.PutPushName(ctx, jid.ToNonAD(), push); err != nil {
-			c.log.Warnf("storing history push name for %s failed: %v", jid, err)
-		}
+// Maintain runs the local, offline upkeep of the stores. Start calls it;
+// it is cheap to call again.
+func (c *Client) Maintain(ctx context.Context) {
+	changed := c.mergeLIDChats() > 0
+	if err := c.foldLegacy(ctx); err != nil {
+		c.log.Warnf("folding legacy messages failed (will retry on next start): %v", err)
 	}
+	if c.seedChatSettings(ctx) {
+		changed = true
+	}
+	if changed {
+		c.emit(ChatEvent{})
+	}
+}
+
+// Stop closes the connection opened by Start. The session stays valid.
+func (c *Client) Stop() {
+	if c.WA == nil {
+		return
+	}
+	if c.connected() && c.getBehavior().SendPresence {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = c.WA.SendPresence(ctx, types.PresenceUnavailable)
+		cancel()
+	}
+	c.WA.Disconnect()
 }
 
 // statusBroadcastJID is WhatsApp's pseudo-chat for Status/story updates.
@@ -257,187 +291,10 @@ func isPseudoChat(jid string) bool {
 	return jid == statusBroadcastJID || strings.HasSuffix(jid, newsletterSuffix)
 }
 
-// ingestMessage keeps chatstore and msgstore current as new messages
-// arrive/are sent after the initial sync (this is what wa watch leans on
-// most heavily; wired in here too so a chat you're mid-conversation with
-// during `wa chat list`/`wa chat open` still looks current).
-func (c *Client) ingestMessage(evt *events.Message) {
-	jid := evt.Info.Chat.String()
-	if isPseudoChat(jid) {
-		return
-	}
-	// Key distribution, history-sync notices and similar plumbing aren't
-	// messages: don't store them, count them as unread, or notify.
-	if isProtocolOnly(evt.Message) {
-		return
-	}
-
-	mediaType, text := classifyMessage(evt.Message)
-	preview := text
-	switch {
-	case mediaType != "" && text != "":
-		preview = fmt.Sprintf("[%s] %s", mediaType, text)
-	case mediaType != "":
-		preview = fmt.Sprintf("[%s]", mediaType)
-	}
-
-	if c.chats != nil {
-		update := chatstore.Chat{
-			JID:                jid,
-			IsGroup:            evt.Info.IsGroup,
-			LastMessageAt:      evt.Info.Timestamp.UnixMilli(),
-			LastMessagePreview: preview,
-		}
-		// PushName is whoever actually sent this specific message —
-		// correct as the chat's name for a 1:1 chat, but only when it's
-		// the *other* person's message. Your own outgoing messages also
-		// fire this event with PushName set to your own profile name,
-		// which would otherwise flip the stored chat name back and
-		// forth between yours and theirs depending on who sent last.
-		// Also wrong for groups (would overwrite the group's real name
-		// with whichever member happened to send most recently).
-		if !evt.Info.IsGroup && !evt.Info.IsFromMe {
-			update.Name = evt.Info.PushName
-		}
-		err := c.chats.Upsert(update)
-		if err != nil {
-			c.log.Warnf("chatstore upsert failed for %s: %v", jid, err)
-		}
-
-		if !evt.Info.IsFromMe {
-			if err := c.chats.IncrementUnread(jid); err != nil {
-				c.log.Warnf("chatstore unread increment failed for %s: %v", jid, err)
-			}
-		}
-	}
-
-	if c.msgs != nil {
-		stored := storedMessage(evt)
-		if err := c.msgs.Append(stored); err != nil {
-			c.log.Warnf("msgstore append failed for %s: %v", jid, err)
-		} else if c.onIncoming != nil {
-			c.onIncoming(stored)
-		}
-	}
-
-	// Messages older than a couple of minutes are an offline backlog being
-	// delivered on reconnect, not new — don't pop one toast per message.
-	if !evt.Info.IsFromMe && c.notifyEnabled && time.Since(evt.Info.Timestamp) < 2*time.Minute {
-		ctx := context.Background()
-		shouldNotify := c.notifyGroups || !evt.Info.IsGroup
-		var chatName string
-		if shouldNotify && c.chats != nil {
-			if chat, ok, err := c.chats.Get(jid); err == nil && ok {
-				shouldNotify = !chat.Muted
-				chatName = chat.Name
-			}
-		}
-		// Chats muted on the phone, synced by whatsmeow via app state.
-		if settings, err := c.WA.Store.ChatSettings.GetChatSettings(ctx, evt.Info.Chat); err == nil && settings.MutedUntil.After(time.Now()) {
-			shouldNotify = false
-		}
-		if shouldNotify {
-			title := c.ResolveName(ctx, evt.Info.Sender.String())
-			if evt.Info.IsGroup && chatName != "" {
-				title += " · " + chatName
-			}
-			body := "New message"
-			if c.notifyShowPreview {
-				switch {
-				case mediaType != "" && text != "":
-					body = fmt.Sprintf("[%s] %s", mediaType, text)
-				case mediaType != "":
-					body = fmt.Sprintf("[%s]", mediaType)
-				case text != "":
-					body = text
-				}
-			}
-			// In the background: the OS toast call can be slow, and this
-			// runs on whatsmeow's event goroutine.
-			go func() {
-				if err := notify.Send(title, body); err != nil {
-					c.log.Warnf("desktop notification failed: %v", err)
-				}
-			}()
-		}
-	}
-}
-
-// storedMessage converts a message event into its msgstore form. Used for
-// both live messages and history-sync messages (via ParseWebMessage).
-func storedMessage(evt *events.Message) msgstore.Message {
-	sender := evt.Info.Sender.String()
-	if evt.Info.IsFromMe {
-		sender = "me"
-	}
-	var raw string
-	if evt.Message != nil {
-		if b, err := proto.Marshal(evt.Message); err == nil {
-			raw = base64.StdEncoding.EncodeToString(b)
-		}
-	}
-	mediaType, text := classifyMessage(evt.Message)
-	return msgstore.Message{
-		ID:        evt.Info.ID,
-		ChatJID:   evt.Info.Chat.String(),
-		SenderJID: sender,
-		Timestamp: evt.Info.Timestamp.UnixMilli(),
-		Text:      text,
-		FromMe:    evt.Info.IsFromMe,
-		MediaType: mediaType,
-		RawProto:  raw,
-	}
-}
-
-// extractPreview trims plain conversational text for display. Kept for
-// HistorySync ingestion, which only has a bare GetConversation()-shaped
-// value at the point it's called (see classifyMessage for the fuller,
-// type-aware version used everywhere else).
-func extractPreview(msg interface{ GetConversation() string }) string {
-	if msg == nil {
-		return ""
-	}
-	text := msg.GetConversation()
-	if len(text) > 80 {
-		text = text[:80] + "…"
-	}
-	return text
-}
-
-// classifyMessage identifies a message's type (empty string for plain
-// text) and extracts its text content — the conversation/extended-text
-// body for text messages, or the caption (if any) for media messages.
-func classifyMessage(msg *waProto.Message) (mediaType, text string) {
-	if msg == nil {
-		return "", ""
-	}
-	switch {
-	case msg.GetConversation() != "":
-		return "", msg.GetConversation()
-	case msg.GetExtendedTextMessage() != nil:
-		return "", msg.GetExtendedTextMessage().GetText()
-	case msg.GetImageMessage() != nil:
-		return "image", msg.GetImageMessage().GetCaption()
-	case msg.GetVideoMessage() != nil:
-		return "video", msg.GetVideoMessage().GetCaption()
-	case msg.GetAudioMessage() != nil:
-		if msg.GetAudioMessage().GetPTT() {
-			return "voice note", ""
-		}
-		return "audio", ""
-	case msg.GetDocumentMessage() != nil:
-		return "document", msg.GetDocumentMessage().GetCaption()
-	case msg.GetStickerMessage() != nil:
-		return "sticker", ""
-	default:
-		return "", ""
-	}
-}
-
 // SyncChats connects, waits up to timeout for chat data to arrive via
 // history sync / messages, then disconnects. Intended for one-shot
 // commands like `wa chat list` that need reasonably current data without
-// a long-running connection (that's what `wa watch`, Phase 5, is for).
+// a long-running connection (that's what `wa watch` is for).
 func (c *Client) SyncChats(ctx context.Context, timeout time.Duration) error {
 	if !c.IsLoggedIn() {
 		return waerrors.ErrNotLoggedIn
@@ -462,7 +319,7 @@ func (c *Client) SyncChats(ctx context.Context, timeout time.Duration) error {
 // IsLoggedIn reports whether the underlying device store already has a
 // persisted session, without opening a network connection.
 func (c *Client) IsLoggedIn() bool {
-	return c.WA.Store.ID != nil
+	return c.WA != nil && c.WA.Store != nil && c.WA.Store.ID != nil
 }
 
 // Contact is a simplified view of a WhatsApp contact.
@@ -610,35 +467,14 @@ func (c *Client) RemoveParticipants(ctx context.Context, groupJID types.JID, par
 
 // Connect establishes the WhatsApp connection. whatsmeow's WA.Connect()
 // only *initiates* the handshake and returns immediately — a request
-// sent right after can race a socket that isn't ready yet. Rather than a
-// blind fixed sleep here (which was slow even when unnecessary), callers
-// that immediately send a request should wrap that request in withRetry
-// instead — genuinely instant when the connection happens to be ready,
-// short backoff only when it actually isn't.
+// sent right after can race a socket that isn't ready yet. Requests that
+// may be sent right after connecting wait for the connection themselves
+// (see awaitConnection) rather than sleeping here.
 func (c *Client) Connect(ctx context.Context) error {
 	if err := c.WA.Connect(); err != nil {
 		return waerrors.Wrap(err, "connecting to WhatsApp")
 	}
 	return nil
-}
-
-// withRetry attempts fn up to 4 times with short, increasing backoff.
-// Used for requests sent right after Connect(), where the first attempt
-// may race a socket that isn't fully ready yet.
-func withRetry(fn func() error) error {
-	backoffs := []time.Duration{0, 300 * time.Millisecond, 800 * time.Millisecond, 2 * time.Second}
-	var lastErr error
-	for _, wait := range backoffs {
-		if wait > 0 {
-			time.Sleep(wait)
-		}
-		if err := fn(); err != nil {
-			lastErr = err
-			continue
-		}
-		return nil
-	}
-	return lastErr
 }
 
 // Login connects and, if unpaired, shows a QR code to scan. It stays
@@ -683,8 +519,6 @@ func (c *Client) Login(ctx context.Context) error {
 
 	// Give WhatsApp time to finish the post-pairing handshake and, if a
 	// chatstore is attached, deliver the one-time HistorySync payload.
-	// This is a fixed wait rather than waiting on *events.Connected —
-	// see Connect()'s comment for why.
 	wait := 15 * time.Second
 	if c.chats != nil {
 		wait = 25 * time.Second
@@ -705,15 +539,6 @@ func (c *Client) Login(ctx context.Context) error {
 
 // Watch keeps a long-running connection open, printing incoming messages
 // and reconnecting on drops, until ctx is cancelled (e.g. Ctrl+C).
-//
-// Given the connection instability observed during Phase 2/3 testing
-// (frequent "Error sending close to websocket" resets, most likely
-// CGNAT-related on some networks), this is deliberately more defensive
-// than SyncChats: it doesn't just trust whatsmeow's built-in reconnect
-// (which may or may not be enabled depending on your pinned version —
-// check `go doc go.mau.fi/whatsmeow.Client` for an EnableAutoReconnect
-// field or similar if reconnects don't happen automatically) — it also
-// watches for *events.Disconnected itself and retries with backoff.
 func (c *Client) Watch(ctx context.Context, guard *safety.Guard) error {
 	if !c.IsLoggedIn() {
 		return waerrors.ErrNotLoggedIn
@@ -745,11 +570,10 @@ func (c *Client) Watch(ctx context.Context, guard *safety.Guard) error {
 	return nil
 }
 
-// reconnectWithBackoff retries WA.Connect() with exponential backoff
-// (capped at 30s) until it succeeds or ctx is cancelled. This is a
-// belt-and-suspenders fallback alongside whatsmeow's own reconnect
-// handling — worth keeping given how unreliable the connection proved
-// to be in earlier testing on some networks.
+// reconnectWithBackoff is a fallback alongside whatsmeow's own
+// reconnect handling: it retries WA.Connect() with exponential backoff
+// (capped at 30s) until there is a connection again — whoever made it —
+// or ctx is cancelled.
 func (c *Client) reconnectWithBackoff(ctx context.Context) {
 	backoff := 2 * time.Second
 	for {
@@ -759,15 +583,21 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) {
 		case <-time.After(backoff):
 		}
 
-		if err := c.WA.Connect(); err != nil {
-			c.log.Warnf("reconnect attempt failed: %v", err)
-			if backoff < 30*time.Second {
-				backoff *= 2
-			}
-			continue
+		if c.WA.IsConnected() {
+			return // whatsmeow's own reconnect got there first
 		}
-		fmt.Println("[reconnected]")
-		return
+		err := c.WA.Connect()
+		if err == nil {
+			fmt.Println("[reconnected]")
+			return
+		}
+		if errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+			return
+		}
+		c.log.Warnf("reconnect attempt failed: %v", err)
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
 }
 
@@ -778,20 +608,23 @@ func (c *Client) printIncoming(evt *events.Message, guard *safety.Guard) {
 	if evt.Info.IsFromMe || isPseudoChat(evt.Info.Chat.String()) {
 		return
 	}
+	a := analyze(unwrapMessage(evt.Message))
+	if a.Class != classRow {
+		return // a reaction, edit, delete or plumbing: not a message to print
+	}
 
 	sender := evt.Info.PushName
 	if sender == "" {
 		sender = evt.Info.Sender.User
 	}
 
-	mediaType, text := classifyMessage(evt.Message)
-	switch {
-	case mediaType != "" && text != "":
-		text = fmt.Sprintf("[%s] %s", mediaType, text)
-	case mediaType != "":
-		text = fmt.Sprintf("[%s]", mediaType)
-	case text == "":
-		text = "[unsupported message type]"
+	text := a.Text
+	switch a.Kind {
+	case KindText, KindSystem, KindUnsupported, KindLocation, KindContact:
+	case KindPoll:
+		text = withMediaTag("poll", text)
+	default:
+		text = withMediaTag(a.MediaType, text)
 	}
 
 	ts := evt.Info.Timestamp.Local().Format("15:04:05")
@@ -811,7 +644,7 @@ func (c *Client) Logout(ctx context.Context) error {
 	if !c.IsLoggedIn() {
 		return waerrors.ErrNotLoggedIn
 	}
-	err := withRetry(func() error {
+	err := c.withRetry(ctx, func() error {
 		return c.WA.Logout(ctx)
 	})
 	if err != nil {
@@ -825,359 +658,4 @@ func (c *Client) Logout(ctx context.Context) error {
 // using the same persisted device store.
 func (c *Client) Disconnect() {
 	c.WA.Disconnect()
-}
-
-// SendText sends a plain text message to jid and returns the sent
-// message's ID (for later reply/forward reference). Callers should call
-// Connect() first.
-func (c *Client) SendText(ctx context.Context, jid types.JID, text string) (string, error) {
-	return c.SendMessage(ctx, jid, TextMessage(text, nil))
-}
-
-// TextMessage builds a text message. When it @mentions anyone it's an
-// ExtendedTextMessage listing them in ContextInfo.MentionedJID; each must
-// appear in text as "@" followed by its JID's user part.
-func TextMessage(text string, mentioned []string) *waProto.Message {
-	if len(mentioned) == 0 {
-		return &waProto.Message{Conversation: proto.String(text)}
-	}
-	return &waProto.Message{ExtendedTextMessage: &waProto.ExtendedTextMessage{
-		Text:        proto.String(text),
-		ContextInfo: &waProto.ContextInfo{MentionedJID: mentioned},
-	}}
-}
-
-// SendMessage sends msg to jid and returns the sent message's ID.
-func (c *Client) SendMessage(ctx context.Context, jid types.JID, msg *waProto.Message) (string, error) {
-	var resp whatsmeow.SendResponse
-	err := withRetry(func() error {
-		var sendErr error
-		resp, sendErr = c.WA.SendMessage(ctx, jid, msg)
-		return sendErr
-	})
-	if err != nil {
-		return "", waerrors.Wrap(err, "sending message")
-	}
-	return resp.ID, nil
-}
-
-// SendReply sends text to jid as a quoted reply to quoted. If quoted's
-// original content couldn't be reconstructed (e.g. an old or unsupported
-// message type), the reply is still sent, just without the visible quote.
-func (c *Client) SendReply(ctx context.Context, jid types.JID, text string, quoted msgstore.Message) (string, error) {
-	ctxInfo := &waProto.ContextInfo{
-		StanzaID:    proto.String(quoted.ID),
-		Participant: proto.String(quoted.SenderJID),
-	}
-	if quotedMsg := decodeRawProto(quoted.RawProto); quotedMsg != nil {
-		ctxInfo.QuotedMessage = quotedMsg
-	}
-
-	msg := &waProto.Message{
-		ExtendedTextMessage: &waProto.ExtendedTextMessage{
-			Text:        proto.String(text),
-			ContextInfo: ctxInfo,
-		},
-	}
-	var resp whatsmeow.SendResponse
-	err := withRetry(func() error {
-		var sendErr error
-		resp, sendErr = c.WA.SendMessage(ctx, jid, msg)
-		return sendErr
-	})
-	if err != nil {
-		return "", waerrors.Wrap(err, "sending reply")
-	}
-	return resp.ID, nil
-}
-
-// SendImage uploads data and sends it as an image message with an
-// optional caption.
-func (c *Client) SendImage(ctx context.Context, jid types.JID, data []byte, mimetype, caption string) (string, error) {
-	upload, err := c.WA.Upload(ctx, data, whatsmeow.MediaImage)
-	if err != nil {
-		return "", waerrors.Wrap(err, "uploading image")
-	}
-	msg := &waProto.Message{
-		ImageMessage: &waProto.ImageMessage{
-			URL:           proto.String(upload.URL),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			Mimetype:      proto.String(mimetype),
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-		},
-	}
-	if caption != "" {
-		msg.ImageMessage.Caption = proto.String(caption)
-	}
-	return c.sendMedia(ctx, jid, msg, "image", caption)
-}
-
-// SendVideo uploads data and sends it as a video message with an
-// optional caption.
-func (c *Client) SendVideo(ctx context.Context, jid types.JID, data []byte, mimetype, caption string) (string, error) {
-	upload, err := c.WA.Upload(ctx, data, whatsmeow.MediaVideo)
-	if err != nil {
-		return "", waerrors.Wrap(err, "uploading video")
-	}
-	msg := &waProto.Message{
-		VideoMessage: &waProto.VideoMessage{
-			URL:           proto.String(upload.URL),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			Mimetype:      proto.String(mimetype),
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-		},
-	}
-	if caption != "" {
-		msg.VideoMessage.Caption = proto.String(caption)
-	}
-	return c.sendMedia(ctx, jid, msg, "video", caption)
-}
-
-// SendAudio uploads data and sends it as an audio message. Set voice=true
-// to send as a voice note (PTT) rather than a regular audio file.
-func (c *Client) SendAudio(ctx context.Context, jid types.JID, data []byte, mimetype string, voice bool) (string, error) {
-	upload, err := c.WA.Upload(ctx, data, whatsmeow.MediaAudio)
-	if err != nil {
-		return "", waerrors.Wrap(err, "uploading audio")
-	}
-	msg := &waProto.Message{
-		AudioMessage: &waProto.AudioMessage{
-			URL:           proto.String(upload.URL),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			Mimetype:      proto.String(mimetype),
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-			PTT:           proto.Bool(voice),
-		},
-	}
-	return c.sendMedia(ctx, jid, msg, "audio", "")
-}
-
-// SendDocument uploads data and sends it as a document message.
-func (c *Client) SendDocument(ctx context.Context, jid types.JID, data []byte, mimetype, filename, caption string) (string, error) {
-	upload, err := c.WA.Upload(ctx, data, whatsmeow.MediaDocument)
-	if err != nil {
-		return "", waerrors.Wrap(err, "uploading document")
-	}
-	msg := &waProto.Message{
-		DocumentMessage: &waProto.DocumentMessage{
-			URL:           proto.String(upload.URL),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			Mimetype:      proto.String(mimetype),
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-			FileName:      proto.String(filename),
-		},
-	}
-	if caption != "" {
-		msg.DocumentMessage.Caption = proto.String(caption)
-	}
-	return c.sendMedia(ctx, jid, msg, "document", caption)
-}
-
-// SendSticker uploads data and sends it as a sticker message. data
-// should already be in WebP format — WhatsApp doesn't accept other
-// formats for stickers, and this doesn't convert for you.
-func (c *Client) SendSticker(ctx context.Context, jid types.JID, data []byte, mimetype string) (string, error) {
-	upload, err := c.WA.Upload(ctx, data, whatsmeow.MediaImage)
-	if err != nil {
-		return "", waerrors.Wrap(err, "uploading sticker")
-	}
-	msg := &waProto.Message{
-		StickerMessage: &waProto.StickerMessage{
-			URL:           proto.String(upload.URL),
-			DirectPath:    proto.String(upload.DirectPath),
-			MediaKey:      upload.MediaKey,
-			Mimetype:      proto.String(mimetype),
-			FileEncSHA256: upload.FileEncSHA256,
-			FileSHA256:    upload.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-		},
-	}
-	return c.sendMedia(ctx, jid, msg, "sticker", "")
-}
-
-func (c *Client) sendMedia(ctx context.Context, jid types.JID, msg *waProto.Message, kind, caption string) (string, error) {
-	var resp whatsmeow.SendResponse
-	err := withRetry(func() error {
-		var sendErr error
-		resp, sendErr = c.WA.SendMessage(ctx, jid, msg)
-		return sendErr
-	})
-	if err != nil {
-		return "", waerrors.Wrap(err, "sending "+kind)
-	}
-
-	// Record the *actual* sent message (including its real upload
-	// reference — URL/MediaKey/hashes) so it can be downloaded or
-	// forwarded again later. This has to happen here rather than in the
-	// cmd layer, which only has msgID and a caption string, not the
-	// real uploaded message object.
-	if c.msgs != nil {
-		var raw string
-		if b, err := proto.Marshal(msg); err == nil {
-			raw = base64.StdEncoding.EncodeToString(b)
-		}
-		err := c.msgs.Append(msgstore.Message{
-			ID:        resp.ID,
-			ChatJID:   jid.String(),
-			SenderJID: "me",
-			Timestamp: time.Now().UnixMilli(),
-			Text:      caption,
-			FromMe:    true,
-			MediaType: kind,
-			RawProto:  raw,
-		})
-		if err != nil {
-			c.log.Warnf("msgstore append failed for sent %s: %v", kind, err)
-		}
-	}
-
-	return resp.ID, nil
-}
-
-// DownloadMedia reconstructs a stored message's media content from its
-// RawProto and downloads it via WhatsApp's encrypted media CDN. Returns
-// the raw bytes and the mimetype recorded with the message.
-func (c *Client) DownloadMedia(ctx context.Context, quoted msgstore.Message) ([]byte, string, error) {
-	original := decodeRawProto(quoted.RawProto)
-	if original == nil {
-		return nil, "", waerrors.New("original message content isn't available (too old, or not captured)")
-	}
-
-	var downloadable whatsmeow.DownloadableMessage
-	var mimetype string
-	switch {
-	case original.GetImageMessage() != nil:
-		downloadable = original.GetImageMessage()
-		mimetype = original.GetImageMessage().GetMimetype()
-	case original.GetVideoMessage() != nil:
-		downloadable = original.GetVideoMessage()
-		mimetype = original.GetVideoMessage().GetMimetype()
-	case original.GetAudioMessage() != nil:
-		downloadable = original.GetAudioMessage()
-		mimetype = original.GetAudioMessage().GetMimetype()
-	case original.GetDocumentMessage() != nil:
-		downloadable = original.GetDocumentMessage()
-		mimetype = original.GetDocumentMessage().GetMimetype()
-	case original.GetStickerMessage() != nil:
-		downloadable = original.GetStickerMessage()
-		mimetype = original.GetStickerMessage().GetMimetype()
-	default:
-		return nil, "", waerrors.New("this message doesn't contain downloadable media")
-	}
-
-	data, err := c.WA.Download(ctx, downloadable)
-	if err != nil {
-		return nil, "", waerrors.Wrap(err, "downloading media")
-	}
-	return data, mimetype, nil
-}
-
-// ForwardMessage re-sends quoted's content to toJID, marked as forwarded.
-// For media messages, this reuses the original upload (URL/MediaKey/
-// hashes) rather than re-uploading — WhatsApp allows resending the same
-// uploaded media reference with IsForwarded set.
-func (c *Client) ForwardMessage(ctx context.Context, toJID types.JID, quoted msgstore.Message) (string, error) {
-	original := decodeRawProto(quoted.RawProto)
-	if original == nil {
-		return "", waerrors.New("original message content isn't available to forward (too old, or not captured)")
-	}
-
-	msg, err := markForwarded(original)
-	if err != nil {
-		return "", err
-	}
-
-	var resp whatsmeow.SendResponse
-	err = withRetry(func() error {
-		var sendErr error
-		resp, sendErr = c.WA.SendMessage(ctx, toJID, msg)
-		return sendErr
-	})
-	if err != nil {
-		return "", waerrors.Wrap(err, "forwarding message")
-	}
-	return resp.ID, nil
-}
-
-// markForwarded returns a message equivalent to original but with
-// IsForwarded/ForwardingScore set on its ContextInfo. Plain Conversation
-// text is normalized into ExtendedTextMessage first, since Conversation
-// (a bare string field) has nowhere to attach ContextInfo. Supports text
-// and all 5 media types; anything else is rejected.
-func markForwarded(original *waProto.Message) (*waProto.Message, error) {
-	bump := func(ci *waProto.ContextInfo) *waProto.ContextInfo {
-		if ci == nil {
-			ci = &waProto.ContextInfo{}
-		}
-		ci.IsForwarded = proto.Bool(true)
-		ci.ForwardingScore = proto.Uint32(ci.GetForwardingScore() + 1)
-		return ci
-	}
-
-	switch {
-	case original.GetConversation() != "":
-		return &waProto.Message{
-			ExtendedTextMessage: &waProto.ExtendedTextMessage{
-				Text:        proto.String(original.GetConversation()),
-				ContextInfo: bump(nil),
-			},
-		}, nil
-	case original.GetExtendedTextMessage() != nil:
-		m := original.GetExtendedTextMessage()
-		m.ContextInfo = bump(m.ContextInfo)
-		return &waProto.Message{ExtendedTextMessage: m}, nil
-	case original.GetImageMessage() != nil:
-		m := original.GetImageMessage()
-		m.ContextInfo = bump(m.ContextInfo)
-		return &waProto.Message{ImageMessage: m}, nil
-	case original.GetVideoMessage() != nil:
-		m := original.GetVideoMessage()
-		m.ContextInfo = bump(m.ContextInfo)
-		return &waProto.Message{VideoMessage: m}, nil
-	case original.GetAudioMessage() != nil:
-		m := original.GetAudioMessage()
-		m.ContextInfo = bump(m.ContextInfo)
-		return &waProto.Message{AudioMessage: m}, nil
-	case original.GetDocumentMessage() != nil:
-		m := original.GetDocumentMessage()
-		m.ContextInfo = bump(m.ContextInfo)
-		return &waProto.Message{DocumentMessage: m}, nil
-	case original.GetStickerMessage() != nil:
-		m := original.GetStickerMessage()
-		m.ContextInfo = bump(m.ContextInfo)
-		return &waProto.Message{StickerMessage: m}, nil
-	default:
-		return nil, waerrors.New("forwarding this message type isn't supported yet")
-	}
-}
-
-// decodeRawProto reconstructs a stored message's original content from
-// its base64-encoded protobuf, returning nil if unavailable or decoding
-// fails (callers should degrade gracefully rather than error out — a
-// reply/forward without the original quote attached is still useful).
-func decodeRawProto(raw string) *waProto.Message {
-	if raw == "" {
-		return nil
-	}
-	data, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil
-	}
-	msg := &waProto.Message{}
-	if err := proto.Unmarshal(data, msg); err != nil {
-		return nil
-	}
-	return msg
 }

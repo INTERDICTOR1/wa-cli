@@ -47,6 +47,29 @@ type Config struct {
 	// notification will still show who messaged you, just not what
 	// they said.
 	NotifyShowPreview bool `json:"notifyShowPreview"`
+
+	// SendReadReceipts lets senders see blue ticks when you open their
+	// chat in the TUI. Off by default: chats are still marked read on your
+	// own devices, but nobody else is told. (If read receipts are turned
+	// off in WhatsApp's own privacy settings, that wins.)
+	SendReadReceipts bool `json:"sendReadReceipts"`
+	// SendPresence shows you as "online" while the TUI's window is focused
+	// and as "typing…" while you type - and is what lets you see the same
+	// about others. Off by default, so using the TUI is invisible.
+	SendPresence bool `json:"sendPresence"`
+	// Mouse enables wheel scrolling and clicking in the TUI. With it on,
+	// hold Shift while dragging to select text the terminal's own way.
+	Mouse bool `json:"mouse"`
+	// ImageProtocol is how the TUI's photo viewer draws: "auto" (pick by
+	// terminal), "sixel", "kitty", "iterm", or "blocks" (plain characters,
+	// works everywhere).
+	ImageProtocol string `json:"imageProtocol"`
+	// DownloadDir is where media saved from the TUI goes; empty means
+	// Downloads/WhatsApp in your home directory.
+	DownloadDir string `json:"downloadDir"`
+	// HistoryDays is how many days of messages to keep on disk; 0 keeps
+	// everything. Each chat's newest messages are always kept.
+	HistoryDays int `json:"historyDays"`
 }
 
 // Default returns sane defaults for a fresh install.
@@ -66,6 +89,10 @@ func Default() Config {
 		NotifyEnabled:        true,
 		NotifyGroups:         true,
 		NotifyShowPreview:    true,
+		SendReadReceipts:     false,
+		SendPresence:         false,
+		Mouse:                true,
+		ImageProtocol:        "auto",
 	}
 }
 

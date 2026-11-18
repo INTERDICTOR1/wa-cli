@@ -1,25 +1,25 @@
 package whatsapp
 
-// NOTE: These tests were written without the ability to compile/run them in
-// the authoring sandbox — go.mod requires go 1.25.0 and the toolchain
-// auto-fetch needed to get it (proxy.golang.org) was blocked by network
-// egress rules there. Please run `go test ./internal/whatsapp/...` locally;
-// if any whatsmeow type/field name below doesn't match the pinned version
-// in go.sum, those are the first things to check.
-
 import (
+	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/codebyoketch/wa-cli/internal/chatstore"
+	"github.com/codebyoketch/wa-cli/internal/localdb"
 	"github.com/codebyoketch/wa-cli/internal/msgstore"
 )
 
@@ -70,6 +70,17 @@ func TestExtractPreview(t *testing.T) {
 	want := strings.Repeat("a", 80) + "…"
 	if got != want {
 		t.Errorf("long text not truncated correctly: got %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+
+	// The cut is between characters, never inside a multi-byte one (it
+	// used to cut at byte 80, leaving half an emoji or Devanagari letter).
+	multi := strings.Repeat("नमस्ते🙂", 30)
+	got = extractPreview(fakeConversation{multi})
+	if !utf8.ValidString(got) {
+		t.Errorf("preview is not valid UTF-8: %q", got)
+	}
+	if want := string([]rune(multi)[:80]) + "…"; got != want {
+		t.Errorf("multi-byte preview = %q, want %q", got, want)
 	}
 }
 
@@ -149,53 +160,112 @@ func TestBestContactName(t *testing.T) {
 	}
 }
 
-// ---- withRetry ----
+// ---- retry ----
 
-func TestWithRetry_SucceedsFirstTry(t *testing.T) {
+// noWait makes retry's pauses instant in tests.
+var noWait = []time.Duration{0, 0, 0, 0}
+
+func always(error) bool { return true }
+
+func TestRetry_SucceedsFirstTry(t *testing.T) {
 	calls := 0
-	err := withRetry(func() error {
+	err := retry(context.Background(), noWait, always, nil, func() error {
 		calls++
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("withRetry: unexpected error: %v", err)
+		t.Fatalf("retry: unexpected error: %v", err)
 	}
 	if calls != 1 {
 		t.Errorf("expected 1 call, got %d", calls)
 	}
 }
 
-func TestWithRetry_SucceedsAfterFailures(t *testing.T) {
+func TestRetry_RepeatsWhileNotConnected(t *testing.T) {
 	calls := 0
-	err := withRetry(func() error {
+	err := retry(context.Background(), noWait, isRetryableSendError, nil, func() error {
 		calls++
 		if calls < 3 {
-			return errString("not ready yet")
+			return whatsmeow.ErrNotConnected
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("withRetry: unexpected error: %v", err)
+		t.Fatalf("retry: unexpected error: %v", err)
 	}
 	if calls != 3 {
 		t.Errorf("expected 3 calls, got %d", calls)
 	}
 }
 
-func TestWithRetry_ExhaustsAndReturnsLastError(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow full-backoff test in -short mode")
-	}
+func TestRetry_ExhaustsAndReturnsLastError(t *testing.T) {
 	calls := 0
-	err := withRetry(func() error {
+	err := retry(context.Background(), noWait, isRetryableSendError, nil, func() error {
 		calls++
-		return errString("always fails")
+		return whatsmeow.ErrNotConnected
 	})
-	if err == nil {
-		t.Fatal("expected error after exhausting retries")
+	if !errors.Is(err, whatsmeow.ErrNotConnected) {
+		t.Fatalf("err = %v, want ErrNotConnected", err)
 	}
-	if calls != 4 {
-		t.Errorf("expected 4 attempts, got %d", calls)
+	if calls != len(noWait) {
+		t.Errorf("expected %d attempts, got %d", len(noWait), calls)
+	}
+}
+
+// The bug this replaces: any error used to be retried, each time under a
+// new message ID, so a send WhatsApp had refused (or accepted but
+// answered late) could go out more than once.
+func TestRetry_DoesNotRepeatOtherErrors(t *testing.T) {
+	for _, failure := range []error{
+		errString("server returned error 479"),
+		whatsmeow.ErrMessageTimedOut,
+		whatsmeow.ErrServerReturnedError,
+	} {
+		calls := 0
+		err := retry(context.Background(), noWait, isRetryableSendError, nil, func() error {
+			calls++
+			return failure
+		})
+		if err != failure || calls != 1 {
+			t.Errorf("%v: got err=%v after %d calls, want that error after 1 call", failure, err, calls)
+		}
+	}
+}
+
+func TestRetry_StopsWhenConnectionNeverComesUp(t *testing.T) {
+	calls := 0
+	err := retry(context.Background(), noWait, isRetryableSendError, func() bool { return false }, func() error {
+		calls++
+		return whatsmeow.ErrNotConnected
+	})
+	if !errors.Is(err, whatsmeow.ErrNotConnected) || calls != 1 {
+		t.Errorf("got err=%v after %d calls, want ErrNotConnected after 1", err, calls)
+	}
+}
+
+func TestIsRetryableSendError(t *testing.T) {
+	retryable := []error{
+		whatsmeow.ErrNotConnected,
+		socket.ErrSocketClosed,
+		&whatsmeow.DisconnectedError{Action: "message send"},
+		fmt.Errorf("wrapped: %w", whatsmeow.ErrNotConnected),
+	}
+	for _, err := range retryable {
+		if !isRetryableSendError(err) {
+			t.Errorf("%v should be retryable", err)
+		}
+	}
+	final := []error{
+		whatsmeow.ErrNotLoggedIn,
+		whatsmeow.ErrMessageTimedOut,
+		whatsmeow.ErrServerReturnedError,
+		context.Canceled,
+		errString("anything else"),
+	}
+	for _, err := range final {
+		if isRetryableSendError(err) {
+			t.Errorf("%v should not be retried", err)
+		}
 	}
 }
 
@@ -310,12 +380,16 @@ func TestDecodeRawProto_RoundTrip(t *testing.T) {
 func newTestClient(t *testing.T, withChats, withMsgs bool) *Client {
 	t.Helper()
 	c := &Client{log: testLogger()}
+	// Both stores live in the same database file, as in the real app.
+	dir := t.TempDir()
 	if withChats {
-		c.chats = chatstore.New(t.TempDir())
+		c.chats = chatstore.New(dir)
 	}
 	if withMsgs {
-		c.msgs = msgstore.New(t.TempDir())
+		c.msgs = msgstore.New(dir)
 	}
+	// Windows can't remove the temp dir while the database is open.
+	t.Cleanup(func() { localdb.Close(dir) })
 	return c
 }
 

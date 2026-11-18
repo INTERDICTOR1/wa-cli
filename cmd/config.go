@@ -95,6 +95,54 @@ var configFields = []configField{
 		get:  func(c config.Config) string { return strconv.FormatBool(c.NotifyShowPreview) },
 		set:  boolSetter(func(c *config.Config, v bool) { c.NotifyShowPreview = v }),
 	},
+	{
+		name: "sendReadReceipts",
+		get:  func(c config.Config) string { return strconv.FormatBool(c.SendReadReceipts) },
+		set:  boolSetter(func(c *config.Config, v bool) { c.SendReadReceipts = v }),
+	},
+	{
+		name: "sendPresence",
+		get:  func(c config.Config) string { return strconv.FormatBool(c.SendPresence) },
+		set:  boolSetter(func(c *config.Config, v bool) { c.SendPresence = v }),
+	},
+	{
+		name: "mouse",
+		get:  func(c config.Config) string { return strconv.FormatBool(c.Mouse) },
+		set:  boolSetter(func(c *config.Config, v bool) { c.Mouse = v }),
+	},
+	{
+		name: "imageProtocol",
+		get:  func(c config.Config) string { return c.ImageProtocol },
+		set: func(c *config.Config, val string) error {
+			switch val {
+			case "auto", "sixel", "kitty", "iterm", "blocks":
+				c.ImageProtocol = val
+				return nil
+			default:
+				return fmt.Errorf("must be one of auto, sixel, kitty, iterm, blocks (got %q)", val)
+			}
+		},
+	},
+	{
+		name: "downloadDir",
+		get:  func(c config.Config) string { return c.DownloadDir },
+		set: func(c *config.Config, val string) error {
+			c.DownloadDir = val
+			return nil
+		},
+	},
+	{
+		name: "historyDays",
+		get:  func(c config.Config) string { return strconv.Itoa(c.HistoryDays) },
+		set: func(c *config.Config, val string) error {
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				return fmt.Errorf("must be a whole number of days, 0 to keep everything (got %q)", val)
+			}
+			c.HistoryDays = n
+			return nil
+		},
+	},
 }
 
 // boolSetter and intSetter adapt a typed field setter to configField.set,

@@ -100,6 +100,68 @@ wa chat list           # sync and list your chats
 Run `wa` with no subcommand to open the full-screen terminal UI instead
 of using individual commands.
 
+## The terminal UI
+
+`wa` opens a two-pane WhatsApp: your chats on the left, the conversation
+on the right. Everything stays on your machine; it uses well under
+100 MB of memory.
+
+| Where | Key | What it does |
+| --- | --- | --- |
+| Chat list | type | search chats and contacts (picking a contact starts a new chat) |
+| | `↑` `↓` `PgUp` `PgDn` | move; the highlighted chat is previewed without marking it read |
+| | `Enter` / `Tab` | open the chat and start typing |
+| | `Ctrl+P` `Ctrl+A` `Ctrl+T` `Ctrl+U` | pin, archive, mute, mark unread (synced with your phone) |
+| | `Ctrl+R` | show or hide archived chats |
+| | `Ctrl+F` | search the messages of every chat |
+| Writing | `Enter` | send |
+| | `Shift+Enter` | new line (also `Ctrl+Enter`, `Alt+Enter`, `Ctrl+J`) |
+| | paste | pasted text keeps its line breaks and stays one message |
+| | `@name` | mention a group member |
+| | `:name` | pick an emoji, e.g. `:thumbsup` |
+| | `Ctrl+O` | attach a file by path — or just drop the file onto the terminal |
+| | `Alt+V` | attach the picture on the clipboard, e.g. a screenshot (Windows) |
+| | `Ctrl+D` | send the attached file as a document instead |
+| | `↑` | select the newest message |
+| | `Ctrl+F` / `Ctrl+G` | search this chat / chat and group info |
+| A selected message | `Enter` | view a photo full screen, open other media or a link, retry a failed send, otherwise reply |
+| | `r` `e` `E` `d` `f` `c` | reply, react, edit, delete (for everyone or just here), forward, copy |
+| | `o` / `s` | open with the default app / save to `Downloads/WhatsApp` |
+| Anywhere | `F1` | all keys |
+| | `Ctrl+C` | quit |
+
+Also there: delivery ticks (✓ sent, ✓✓ delivered, blue ✓✓ read), "typing…"
+and "online / last seen", replies shown with what they quote, reactions
+and edits applied to the message they belong to, polls with their tally,
+drafts kept per chat, unread counts in the window title, mouse wheel
+scrolling and clicking, and older history loaded as you scroll up (asked
+from your phone when it isn't stored locally).
+
+**Photos in HD.** `Enter` on a photo opens it full screen at the best
+quality the terminal can show: real pixels through Sixel (Windows
+Terminal 1.22+ and others), the Kitty protocol or iTerm2's, falling back
+to block characters anywhere else (`m` switches mode, `o` opens the
+original in your system's image viewer). When someone sends a photo in
+HD, the HD version replaces the standard one. Photos you send go out at
+their original quality (up to 4096 px on the long side) rather than
+recompressed.
+
+Settings. Read receipts and "online" / "typing…" are off by default, so
+reading in the terminal tells nobody anything; turn them on to behave
+like the official apps:
+
+```sh
+wa config set sendReadReceipts true    # senders get blue ticks when you open their chat
+wa config set sendPresence true        # show "online" / "typing…" (and see others'; WhatsApp only shares it both ways)
+wa config set mouse false              # leave the mouse to the terminal (text selection)
+wa config set imageProtocol auto|sixel|kitty|iterm|blocks
+wa config set downloadDir <folder>     # where saved media goes
+wa config set historyDays 0            # days of messages to keep; 0 = everything
+```
+
+`WA_DEMO=1 wa` opens the same interface on made-up chats — nothing is
+connected or sent — to try it out.
+
 ## Usage
 
 **Chats**

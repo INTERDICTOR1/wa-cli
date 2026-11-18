@@ -1,18 +1,11 @@
 package tui
 
 import (
-	"context"
-	"sort"
 	"strings"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"go.mau.fi/whatsmeow/types"
-
-	"github.com/codebyoketch/wa-cli/internal/whatsapp"
 )
 
-// maxSuggestions is how many @mention matches the dropdown shows.
-const maxSuggestions = 5
+// maxSuggestions is how many matches a dropdown shows.
+const maxSuggestions = 6
 
 // member is someone who can be @mentioned in the open group.
 type member struct {
@@ -21,51 +14,23 @@ type member struct {
 	words []string // lower-cased words of name, for matching
 }
 
-// mention is a member picked from the dropdown into the input text.
+// mention is a member picked from the dropdown into the message text.
 type mention struct{ name, jid string }
-
-type membersLoadedMsg struct {
-	groupJID string
-	members  []member
-}
-
-// loadMembersCmd fetches the group's members (one network request) and
-// resolves their names. Only the open group's members are ever held.
-func loadMembersCmd(ctx context.Context, client *whatsapp.Client, groupJID string) tea.Cmd {
-	return func() tea.Msg {
-		jid, err := types.ParseJID(groupJID)
-		if err != nil {
-			return membersLoadedMsg{groupJID: groupJID}
-		}
-		_, parts, err := client.GroupInfo(ctx, jid)
-		if err != nil {
-			return errMsg{err}
-		}
-		me, myLID := client.WA.Store.GetJID().User, client.WA.Store.GetLID().User
-		members := make([]member, 0, len(parts))
-		for _, p := range parts {
-			user, _, _ := strings.Cut(p.JID, "@")
-			if user == me || user == myLID {
-				continue
-			}
-			name := client.ResolveName(ctx, p.JID)
-			members = append(members, member{jid: p.JID, name: name, words: strings.Fields(strings.ToLower(name))})
-		}
-		sort.Slice(members, func(i, j int) bool { return members[i].name < members[j].name })
-		return membersLoadedMsg{groupJID: groupJID, members: members}
-	}
-}
 
 // mentionQuery returns the text typed after an "@" that starts a word,
 // up to the cursor (pos, in runes): "@shashwat tri" -> "shashwat tri".
 // ok is false when the cursor isn't in a mention.
 func mentionQuery(value string, pos int) (query string, start int, ok bool) {
-	before := []rune(value)[:pos]
+	runes := []rune(value)
+	before := runes[:max(0, min(pos, len(runes)))]
 	for i := len(before) - 1; i >= 0; i-- {
+		if before[i] == '\n' {
+			return "", 0, false // mentions don't span lines
+		}
 		if before[i] != '@' {
 			continue
 		}
-		if i > 0 && before[i-1] != ' ' {
+		if i > 0 && before[i-1] != ' ' && before[i-1] != '\n' {
 			return "", 0, false // e.g. an email address
 		}
 		q := string(before[i+1:])

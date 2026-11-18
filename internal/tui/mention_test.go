@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codebyoketch/wa-cli/internal/chatstore"
+	"github.com/codebyoketch/wa-cli/internal/whatsapp"
 )
 
 func mk(jid, name string) member {
@@ -68,44 +68,45 @@ func TestMentionQuery(t *testing.T) {
 }
 
 func TestMentionDropdownFlow(t *testing.T) {
-	var m tea.Model = newModel(nil, nil, nil, nil, nil)
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	m, _ = m.Update(chatsLoadedMsg{chats: []chatstore.Chat{{JID: "g@g.us", Name: "GradPipe Core", IsGroup: true}}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-
-	// First "@" in the group starts loading its members.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'@'}})
-	if got := m.(model); got.membersFor != "g@g.us" || !got.membersLoading || cmd == nil {
-		t.Fatalf("typing @ should load members: for=%q loading=%v", got.membersFor, got.membersLoading)
+	be := newFake()
+	be.chats = []whatsapp.ChatView{chat("g@g.us", "GradPipe Core", 1)}
+	for _, mem := range group {
+		be.members["g@g.us"] = append(be.members["g@g.us"], whatsapp.Member{JID: mem.jid, Name: mem.name})
 	}
-	if !strings.Contains(m.View(), "loading group members") {
-		t.Fatal("no loading line while members load")
-	}
-	m, _ = m.Update(membersLoadedMsg{groupJID: "g@g.us", members: group})
+	h := newHarness(t, be, 100, 30)
+	h.key(tea.KeyEnter)
 
-	m = typeKeys(m, "shashwat")
-	view := m.View()
+	// The first "@" in the group loads its members.
+	h.typeText("@")
+	if h.m.sug.membersFor != "g@g.us" || len(h.m.sug.members) != len(group) {
+		t.Fatalf("typing @ should load members: for=%q n=%d", h.m.sug.membersFor, len(h.m.sug.members))
+	}
+
+	h.typeText("shashwat")
+	view := h.frame()
 	if !strings.Contains(view, "Shashwat Pranav") || !strings.Contains(view, "Shashwat Tripathi") {
 		t.Fatalf("dropdown should list both Shashwats")
 	}
-	if n := strings.Count(view, "\n") + 1; n > 30 {
-		t.Fatalf("dropdown grew the frame to %d lines", n)
-	}
 
-	m = typeKeys(m, " tri")
-	if got := m.(model).suggestions; len(got) != 1 || got[0].name != "Shashwat Tripathi" {
-		t.Fatalf("suggestions = %v", names(got))
+	h.typeText(" tri")
+	if got := h.m.sug.items; len(got) != 1 || got[0].label != "Shashwat Tripathi" {
+		t.Fatalf("suggestions = %+v", got)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	got := m.(model)
-	if got.input.Value() != "@Shashwat Tripathi " || len(got.mentions) != 1 || len(got.suggestions) != 0 {
-		t.Fatalf("after Tab: value=%q mentions=%d open=%d", got.input.Value(), len(got.mentions), len(got.suggestions))
+	h.key(tea.KeyTab)
+	if v := h.m.ed.Value(); v != "@Shashwat Tripathi " || len(h.m.sug.picked) != 1 || h.m.sug.active() {
+		t.Fatalf("after Tab: value=%q picked=%d open=%v", v, len(h.m.sug.picked), h.m.sug.active())
 	}
 
 	// Typing on after the mention must not reopen the dropdown.
-	m = typeKeys(m, "kal")
-	if got := m.(model); got.input.Value() != "@Shashwat Tripathi kal" || len(got.suggestions) != 0 {
-		t.Fatalf("value=%q suggestions=%d", got.input.Value(), len(got.suggestions))
+	h.typeText("kal")
+	if v := h.m.ed.Value(); v != "@Shashwat Tripathi kal" || h.m.sug.active() {
+		t.Fatalf("value=%q open=%v", v, h.m.sug.active())
+	}
+
+	// Sending rewrites the name to the form WhatsApp needs.
+	h.key(tea.KeyEnter)
+	if len(be.sent) != 1 || be.sent[0].out.Text != "@3 kal" || strings.Join(be.sent[0].out.Mentions, ",") != "3@lid" {
+		t.Fatalf("sent = %+v", be.sent)
 	}
 }
 

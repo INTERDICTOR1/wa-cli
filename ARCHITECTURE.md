@@ -16,11 +16,14 @@ main.go
 
         └── internal/whatsapp        whatsmeow wrapper: the actual WhatsApp client
               ├── internal/store       Session/device persistence (SQLite)
-              ├── internal/chatstore   Local chat index (JSON)
-              ├── internal/msgstore    Local per-chat message history (JSON)
+              ├── internal/chatstore   Local chat index      ┐ one SQLite file,
+              ├── internal/msgstore    Local message history ┘ via internal/localdb
+              ├── internal/termimg     Image decoding/scaling within a memory budget
               └── internal/notify      Desktop notifications (beeep)
 
         └── internal/tui              Full-screen terminal UI (Bubble Tea)
+              ├── internal/conin       Windows console input (pastes, Shift+Enter)
+              └── internal/termimg     Drawing photos (Sixel, Kitty, iTerm2, blocks)
         └── internal/extension        Plugin system (git-cloned subprocesses)
         └── internal/qr               ASCII QR rendering for login
         └── internal/ratelimit        Persisted send-rate limits
@@ -43,13 +46,18 @@ graph TD
 
     cmd --> whatsapp["internal/whatsapp"]
     whatsapp --> store["internal/store (SQLite session)"]
-    whatsapp --> chatstore["internal/chatstore (JSON chat index)"]
-    whatsapp --> msgstore["internal/msgstore (JSON message history)"]
+    whatsapp --> chatstore["internal/chatstore (chat index)"]
+    whatsapp --> msgstore["internal/msgstore (message history)"]
+    chatstore --> localdb["internal/localdb (SQLite: wa.db)"]
+    msgstore --> localdb
+    whatsapp --> termimg["internal/termimg (images)"]
     whatsapp --> notify["internal/notify (beeep)"]
     whatsapp --> whatsmeow["go.mau.fi/whatsmeow"]
 
     cmd --> tui["internal/tui (Bubble Tea)"]
     tui --> whatsapp
+    tui --> conin["internal/conin (Windows console input)"]
+    tui --> termimg
 
     cmd --> extension["internal/extension (plugin subprocesses)"]
     cmd --> qr["internal/qr"]
@@ -192,24 +200,121 @@ property each one exists for:
 - **`internal/store`** — whatsmeow's own SQLite device/session store.
   This is what makes `wa login` persist across runs; whatsmeow owns its
   schema, wa-cli just points it at a data directory.
-- **`internal/chatstore`** — a local JSON index of chats (name, JID,
-  last message preview, unread count, mute state) so `wa chat
-  list/search/info` have something to read *without* a network
-  connection, across separate CLI invocations. Deliberately not a cache
-  of everything WhatsApp knows — see the `HistorySync`-timing caveat in
-  ROADMAP's Known Issues.
-- **`internal/msgstore`** — a rolling window of recent messages per
-  chat, so `wa chat open` can show numbered history and `wa chat
-  reply`/`forward`/`media download` can reference a message by that
-  number later, in a separate process invocation.
+- **`internal/chatstore`** — the local index of chats (name, JID, last
+  message preview, unread count, pin/archive/mute state, draft) so `wa
+  chat list/search/info` and the TUI's chat list have something to read
+  *without* a network connection, across separate invocations.
+- **`internal/msgstore`** — the local message history: one row per
+  message with its current state (delivery status, edited/deleted,
+  reactions, poll votes), so the TUI can page through a chat and `wa chat
+  reply`/`forward`/`media download` can reference a message later, in a
+  separate process.
+
+`chatstore` and `msgstore` share one SQLite file, `wa.db`, opened once
+per process by **`internal/localdb`** (the same pure-Go driver whatsmeow's
+own store uses, so no extra dependency). They used to be two JSON files
+rewritten in full on every incoming message and re-read in full on every
+redraw - about 20 MB of garbage per message on a busy account, which is
+also why history was capped at 48 hours. With SQLite a message is one
+small write, reads are paged, memory no longer grows with history, and
+two `wa` processes (a `wa chat send` while the TUI is open) can't
+overwrite each other. The old `chats.json`/`messages.json` are imported
+once and renamed to `*.migrated`. The TUI has that import done by a
+short-lived helper process (`wa migrate-store`, hidden): parsing the whole
+old history at once is the most memory-hungry thing wa-cli ever does, and
+a process doesn't give all of that memory back.
+
+### One row per message
+
+WhatsApp delivers reactions, edits, deletions, poll votes and the HD
+version of a photo as separate messages that *refer to* an earlier one.
+`internal/whatsapp` folds each of them into the message it belongs to
+as it arrives (and once, at startup, for history imported from the old
+JSON store) instead of storing it as its own row. That is what lets the
+TUI show a message with its reactions underneath, its edited text, and
+the HD photo in place of the standard one - and it keeps unread counts
+and notifications honest (a reaction is not a new message).
+
+### One chat per person
+
+WhatsApp is moving accounts from phone-number IDs
+(`...@s.whatsapp.net`) to privacy IDs (`...@lid`); the same conversation
+can arrive under either. `internal/whatsapp` maps a privacy ID to the
+phone number whenever whatsmeow knows the pairing, and merges chats that
+were stored under both, so a person appears once in the chat list.
 
 ## `internal/tui` — the full-screen interface
 
-Built on Bubble Tea/Lip Gloss/Bubbles. Runs when `wa` is invoked with no
+Built on Bubble Tea and Lip Gloss. Runs when `wa` is invoked with no
 subcommand. Owns the whole terminal for its run, which is why it needs
 its own stdout redirect (to a log file, not stderr like
 `captureLibraryStdout` — there's no "interactive terminal" to print
 warnings to while the TUI has the screen).
+
+The TUI never touches whatsmeow, protobufs or the stores. It talks to a
+`Backend` interface (`internal/tui/backend.go`) that `*whatsapp.Client`
+implements, and is told about changes through typed events
+(`internal/whatsapp/api.go`: a message was added or changed, a chat's
+list entry changed, someone is typing, the connection dropped). That
+seam is what makes it testable: the unit tests drive the real model
+with a fake backend, and `WA_DEMO=1 wa` runs the real program on an
+in-memory pretend WhatsApp (`demo.go`) - which the Windows end-to-end
+test launches inside a pseudo console to type and paste into it.
+
+```
+keys, mouse, resize ──┐                       ┌── tea.Cmd: Backend calls
+  (conin on Windows)  ├─► model.Update ───────┤     (load a page, send, react…)
+WhatsApp events ──────┘     │                 └── results come back as messages
+                            ▼
+                        model.View ─► chat list │ header, messages, message box
+```
+
+- `model.go` holds the state and reacts to every event; `keys.go` maps
+  keys to actions for whichever area has focus (chat list, message box,
+  a selected message) or whatever is temporarily on top (a question,
+  the reaction picker, an overlay, the photo viewer).
+- `messages.go` keeps only a window of the open chat in memory (80
+  messages at a time, more as you scroll up) and draws each message
+  once, re-drawing it only when it, the width, or its picture changes.
+  The scroll position is counted from the bottom, so older pages can be
+  added above without anything moving.
+- `editor.go` is the multi-line message box. Line breaks are ordinary
+  characters in it; only a deliberate Enter sends.
+- `viewer.go` shows a photo full screen. Pixels can't go through Bubble
+  Tea (it only knows text), so the viewer shows an empty frame and
+  writes the picture straight to the terminal over it.
+
+### Why Windows has its own input reader (`internal/conin`)
+
+Bubble Tea v1 reads the Windows console one key record at a time. A
+paste arrives as a stream of key presses in which every line break is
+an Enter - indistinguishable from the user pressing Enter - so pasted
+multi-line text used to be sent as one message per line. `conin` reads
+the console itself: key presses that arrive together in one batch can
+only be a paste, and are delivered as a single paste message, the same
+shape Bubble Tea produces on Unix terminals (which mark pastes
+explicitly). Reading the console directly also provides what Bubble
+Tea's reader drops: Shift+Enter, focus changes (used to show you as
+online only while the window is focused), and whole emoji instead of
+half surrogate pairs. Where neither `conin` nor bracketed paste is
+available, the model falls back to timing: an Enter that arrives within
+a few milliseconds of another key is a pasted line break, not "send".
+
+### Memory
+
+The budget is 100 MB for everything. What keeps it there:
+
+- messages are paged from SQLite, never loaded wholesale;
+- names are resolved once and cached, not looked up per message per
+  frame;
+- in-chat pictures are drawn from the thumbnail embedded in the
+  message, one at a time, and only the drawn text is kept (bounded);
+- a full-size photo is downloaded to disk, decoded only if its decoded
+  size fits `termimg.DefaultBudget` (checked from the header first),
+  scaled to the screen immediately, and released before drawing;
+- files being sent are uploaded from disk as a stream;
+- the Go runtime is given a soft limit (`debug.SetMemoryLimit`) below
+  the budget, since SQLite's caches live outside the Go heap.
 
 ## `internal/extension` — the plugin system
 

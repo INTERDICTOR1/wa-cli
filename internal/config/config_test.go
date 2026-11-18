@@ -76,6 +76,9 @@ func TestDefault_HasSaneNonZeroValues(t *testing.T) {
 	if cfg.MaxMessagesPerMinute <= 0 || cfg.MaxMessagesPerHour <= 0 || cfg.MaxMessagesPerDay <= 0 {
 		t.Errorf("Default() rate limits should be positive by default, got %+v", cfg)
 	}
+	if cfg.SendReadReceipts || cfg.SendPresence {
+		t.Error("Default() should send neither read receipts nor presence — telling others what you do is an opt-in")
+	}
 }
 
 func TestLoad_NoFileReturnsDefaults(t *testing.T) {

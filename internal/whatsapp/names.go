@@ -2,8 +2,8 @@ package whatsapp
 
 import (
 	"context"
-	"fmt"
 	"strings"
+	"time"
 
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -12,6 +12,11 @@ import (
 	"github.com/codebyoketch/wa-cli/internal/msgstore"
 )
 
+// nameCacheMax bounds the resolved-name cache. A personal account knows a
+// few thousand people at most; when the cache fills up it is simply
+// dropped and refilled.
+const nameCacheMax = 4096
+
 // ResolveName returns the best display name for a user JID string, using
 // only local data (whatsmeow's contact and LID stores, no network):
 // address-book full name, first name, push name, business name, then the
@@ -19,36 +24,145 @@ import (
 // its phone-number JID, since address-book names are stored under that.
 // Not meant for group JIDs — those have no contact entry and fall
 // through to the raw ID.
+//
+// Results are cached until a name changes, so resolving the senders of a
+// page of messages costs one lookup per distinct sender.
 func (c *Client) ResolveName(ctx context.Context, jidStr string) string {
+	name, _ := c.resolveName(ctx, jidStr)
+	return name
+}
+
+// knownName is ResolveName without the phone-number fallback: "" unless
+// a real name (address book, push or business name) is known.
+func (c *Client) knownName(ctx context.Context, jidStr string) string {
+	name, known := c.resolveName(ctx, jidStr)
+	if !known {
+		return ""
+	}
+	return name
+}
+
+// nameEntry is one cached name lookup.
+type nameEntry struct {
+	name  string
+	known bool // a real name, not just the phone number or raw ID
+}
+
+// resolveName is the cached name lookup behind ResolveName.
+func (c *Client) resolveName(ctx context.Context, jidStr string) (name string, known bool) {
+	if jidStr == senderMe {
+		return "You", true
+	}
+	c.nameMu.Lock()
+	entry, ok := c.nameCache[jidStr]
+	gen := c.nameGen
+	c.nameMu.Unlock()
+	if ok {
+		return entry.name, entry.known
+	}
+
+	name, known = c.lookupName(ctx, jidStr)
+
+	c.nameMu.Lock()
+	if gen == c.nameGen { // not invalidated while looking up
+		if c.nameCache == nil || len(c.nameCache) >= nameCacheMax {
+			c.nameCache = make(map[string]nameEntry, 256)
+		}
+		c.nameCache[jidStr] = nameEntry{name, known}
+	}
+	c.nameMu.Unlock()
+	return name, known
+}
+
+// lookupName resolves jidStr without the cache. known is false when the
+// result is only a formatted phone number or raw ID.
+func (c *Client) lookupName(ctx context.Context, jidStr string) (name string, known bool) {
 	jid, err := types.ParseJID(jidStr)
 	if err != nil {
-		return jidStr
+		return jidStr, false
 	}
 	jid = jid.ToNonAD()
+	if c.isMe(jid) {
+		return "You", true
+	}
 
 	pn := jid
 	if jid.Server == types.HiddenUserServer {
-		if mapped, err := c.WA.Store.LIDs.GetPNForLID(ctx, jid); err == nil && !mapped.IsEmpty() {
+		if mapped := c.pnForLID(jid); !mapped.IsEmpty() {
 			pn = mapped
 		}
 	}
 
-	var infos []types.ContactInfo
-	if pn != jid {
-		if info, err := c.WA.Store.Contacts.GetContact(ctx, pn); err == nil {
+	if src := c.contacts(); src != nil {
+		var infos []types.ContactInfo
+		if pn != jid {
+			if info, err := src.GetContact(ctx, pn); err == nil {
+				infos = append(infos, info)
+			}
+		}
+		if info, err := src.GetContact(ctx, jid); err == nil {
 			infos = append(infos, info)
 		}
-	}
-	if info, err := c.WA.Store.Contacts.GetContact(ctx, jid); err == nil {
-		infos = append(infos, info)
-	}
-	if name := pickName(infos...); name != "" {
-		return name
+		// A phone-number JID's names may also sit under its LID (push
+		// names of people met in LID-addressed groups).
+		if jid.Server == types.DefaultUserServer {
+			if lid := c.lidForPN(jid); !lid.IsEmpty() {
+				if info, err := src.GetContact(ctx, lid); err == nil {
+					infos = append(infos, info)
+				}
+			}
+		}
+		if name := pickName(infos...); name != "" {
+			return name, true
+		}
 	}
 	if pn.Server == types.DefaultUserServer {
-		return formatPhone(pn.User)
+		return formatPhone(pn.User), false
 	}
-	return jid.User
+	if jid.User == "" {
+		return jidStr, false
+	}
+	return jid.User, false
+}
+
+// invalidateNames drops every cached name and schedules a NamesEvent.
+// Call it whenever a contact, push or business name may have changed.
+func (c *Client) invalidateNames() {
+	c.nameMu.Lock()
+	c.nameCache = nil
+	c.nameGen++
+	c.nameMu.Unlock()
+	c.scheduleNamesEvent()
+}
+
+// namesEventInterval is the shortest time between two NamesEvents: a
+// contact sync changes thousands of names in a burst.
+const namesEventInterval = time.Second
+
+// scheduleNamesEvent emits a NamesEvent now, or, if one went out less
+// than namesEventInterval ago, once that interval has passed.
+func (c *Client) scheduleNamesEvent() {
+	c.namesMu.Lock()
+	if c.namesPending {
+		c.namesMu.Unlock()
+		return
+	}
+	wait := namesEventInterval - time.Since(c.namesLast)
+	if wait <= 0 {
+		c.namesLast = time.Now()
+		c.namesMu.Unlock()
+		c.emit(NamesEvent{})
+		return
+	}
+	c.namesPending = true
+	c.namesMu.Unlock()
+	time.AfterFunc(wait, func() {
+		c.namesMu.Lock()
+		c.namesPending = false
+		c.namesLast = time.Now()
+		c.namesMu.Unlock()
+		c.emit(NamesEvent{})
+	})
 }
 
 // pickName returns the first non-empty name across infos, trying each
@@ -81,62 +195,41 @@ func formatPhone(digits string) string {
 	return "+" + digits
 }
 
-// DisplayText renders a stored message for display: text and captions,
-// [media] tags, reactions, edits, deletes, and @mentions as @name. hidden
-// is true for pure protocol messages (key distribution, history-sync
-// notices, ...) that aren't something a person sent and shouldn't be
-// shown at all.
+// DisplayText renders a stored message as one line for `wa chat open`:
+// text and captions, [media] tags and @mentions as @name. hidden is true
+// for rows that aren't a message of their own: protocol plumbing, and
+// reactions, edits or deletes that haven't been folded into their target
+// yet.
 func (c *Client) DisplayText(ctx context.Context, m msgstore.Message) (text string, hidden bool) {
-	return displayText(decodeRawProto(m.RawProto), m, func(jid string) string {
+	return displayText(contentOf(m), m, func(jid string) string {
 		return c.ResolveName(ctx, jid)
 	})
 }
 
 func displayText(msg *waProto.Message, m msgstore.Message, resolve func(string) string) (string, bool) {
+	if m.Deleted {
+		return "[deleted]", false
+	}
 	if msg == nil {
-		// No raw content (e.g. a message just sent from the TUI) — fall
-		// back to what msgstore recorded.
+		// No raw content — fall back to what msgstore recorded.
 		return withMediaTag(m.MediaType, m.Text), false
 	}
-	if isProtocolOnly(msg) {
+	a := analyze(msg)
+	if a.Class != classRow {
 		return "", true
 	}
-
-	// REVOKE is enum value 0, which is also what GetType() returns on a
-	// nil ProtocolMessage — so check presence before comparing types.
-	pm := msg.GetProtocolMessage()
+	body := resolveMentions(a.Text, a.Ctx.GetMentionedJID(), resolve)
 	var text string
-	switch {
-	case msg.GetReactionMessage() != nil:
-		if r := msg.GetReactionMessage().GetText(); r != "" {
-			text = "[reaction " + r + "]"
-		} else {
-			text = "[reaction removed]"
-		}
-	case pm != nil && pm.GetType() == waProto.ProtocolMessage_REVOKE:
-		text = "[deleted]"
-	case pm != nil && pm.GetType() == waProto.ProtocolMessage_MESSAGE_EDIT:
-		edited := pm.GetEditedMessage()
-		text = strings.TrimSpace("[edited] " + withMediaTag(classifyMessage(edited)))
-		msg = edited // mentions live on the edited content
-	case msg.GetSecretEncryptedMessage() != nil:
-		text = "[edited]"
-	case msg.GetTemplateMessage() != nil:
-		text = msg.GetTemplateMessage().GetHydratedTemplate().GetHydratedContentText()
-		if text == "" {
-			text = "[template]"
-		}
+	switch a.Kind {
+	case KindText, KindSystem, KindUnsupported, KindLocation, KindContact:
+		text = body
+	case KindPoll:
+		text = withMediaTag("poll", body)
 	default:
-		text = withMediaTag(classifyMessage(msg))
-		if text == "" {
-			text = "[" + firstFieldName(msg) + "]"
-		}
+		text = withMediaTag(a.MediaType, body)
 	}
-
-	for _, jid := range mentionedJIDs(msg) {
-		if at := strings.Index(jid, "@"); at > 0 {
-			text = strings.ReplaceAll(text, "@"+jid[:at], "@"+resolve(jid))
-		}
+	if m.Edited && text != "" {
+		text += " (edited)"
 	}
 	return text, false
 }
@@ -144,30 +237,41 @@ func displayText(msg *waProto.Message, m msgstore.Message, resolve func(string) 
 func withMediaTag(mediaType, text string) string {
 	switch {
 	case mediaType != "" && text != "":
-		return fmt.Sprintf("[%s] %s", mediaType, text)
+		return "[" + mediaType + "] " + text
 	case mediaType != "":
-		return fmt.Sprintf("[%s]", mediaType)
+		return "[" + mediaType + "]"
 	}
 	return text
 }
 
-// isProtocolOnly reports whether msg carries nothing a person sent: only
-// encryption-key distribution / message metadata, or a protocolMessage
-// other than a delete or edit.
+// resolveMentions replaces each "@<user part>" of a mentioned JID in text
+// with "@<name>".
+func resolveMentions(text string, mentioned []string, resolve func(string) string) string {
+	if text == "" || resolve == nil {
+		return text
+	}
+	for _, jid := range mentioned {
+		if at := strings.Index(jid, "@"); at > 0 {
+			text = strings.ReplaceAll(text, "@"+jid[:at], "@"+resolve(jid))
+		}
+	}
+	return text
+}
+
+// isProtocolOnly reports whether msg is not a message of its own: pure
+// plumbing, or an event (reaction, edit, delete, vote, ...) that belongs
+// to another message.
 func isProtocolOnly(msg *waProto.Message) bool {
-	if msg == nil {
-		return true
-	}
-	if pm := msg.GetProtocolMessage(); pm != nil {
-		return pm.GetType() != waProto.ProtocolMessage_REVOKE && pm.GetType() != waProto.ProtocolMessage_MESSAGE_EDIT
-	}
-	return firstFieldName(msg) == ""
+	return analyze(unwrapMessage(msg)).Class != classRow
 }
 
 // firstFieldName returns the name of the first content field set on msg,
 // ignoring plumbing fields, with the "Message" suffix trimmed (so
 // locationMessage -> "location"). "" if there is no content field.
 func firstFieldName(msg *waProto.Message) string {
+	if msg == nil {
+		return ""
+	}
 	var name string
 	msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
 		switch fd.Name() {
@@ -178,19 +282,4 @@ func firstFieldName(msg *waProto.Message) string {
 		return false
 	})
 	return name
-}
-
-// mentionedJIDs returns the JIDs @mentioned in msg's text or caption.
-func mentionedJIDs(msg *waProto.Message) []string {
-	switch {
-	case msg.GetExtendedTextMessage() != nil:
-		return msg.GetExtendedTextMessage().GetContextInfo().GetMentionedJID()
-	case msg.GetImageMessage() != nil:
-		return msg.GetImageMessage().GetContextInfo().GetMentionedJID()
-	case msg.GetVideoMessage() != nil:
-		return msg.GetVideoMessage().GetContextInfo().GetMentionedJID()
-	case msg.GetDocumentMessage() != nil:
-		return msg.GetDocumentMessage().GetContextInfo().GetMentionedJID()
-	}
-	return nil
 }

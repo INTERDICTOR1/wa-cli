@@ -18,6 +18,7 @@ import (
 	"github.com/codebyoketch/wa-cli/internal/app"
 	"github.com/codebyoketch/wa-cli/internal/chatstore"
 	"github.com/codebyoketch/wa-cli/internal/config"
+	"github.com/codebyoketch/wa-cli/internal/localdb"
 	"github.com/codebyoketch/wa-cli/internal/msgstore"
 )
 
@@ -116,6 +117,19 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	}
 	os.Stdout = w
 
+	// Read while fn writes: a pipe only holds a few kilobytes (4 on
+	// Windows), so output bigger than that - a completion script is 16 kB -
+	// would block fn forever if nothing were reading yet.
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := io.ReadAll(r)
+		done <- result{out, err}
+	}()
+
 	fnErr := fn()
 
 	if err := w.Close(); err != nil {
@@ -123,11 +137,11 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	}
 	os.Stdout = orig
 
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("reading captured stdout: %v", err)
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("reading captured stdout: %v", res.err)
 	}
-	return string(out), fnErr
+	return string(res.out), fnErr
 }
 
 func TestCompletionCmd_Bash(t *testing.T) {
@@ -325,7 +339,12 @@ func withAppDataDir(t *testing.T) string {
 		Config: config.Config{DataDir: dir},
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	t.Cleanup(func() { a = orig })
+	t.Cleanup(func() {
+		a = orig
+		// The stores keep wa.db open; Windows can't delete an open file
+		// when the temp dir is cleaned up.
+		localdb.CloseAll()
+	})
 	return dir
 }
 

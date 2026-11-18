@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"testing"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -65,15 +66,26 @@ func TestDisplayText(t *testing.T) {
 			Text:        proto.String("@177403959709918 kal bank?"),
 			ContextInfo: &waProto.ContextInfo{MentionedJID: []string{"177403959709918@lid"}},
 		}}, "@Asha kal bank?", false},
-		{"reaction", &waProto.Message{ReactionMessage: &waProto.ReactionMessage{Text: proto.String("👍")}}, "[reaction 👍]", false},
-		{"reaction removed", &waProto.Message{ReactionMessage: &waProto.ReactionMessage{}}, "[reaction removed]", false},
-		{"deleted", ptype(waProto.ProtocolMessage_REVOKE), "[deleted]", false},
+		// Reactions, deletes and edits belong to another message: they are
+		// folded into it and never shown as lines of their own.
+		{"reaction", &waProto.Message{ReactionMessage: &waProto.ReactionMessage{Text: proto.String("👍")}}, "", true},
+		{"reaction removed", &waProto.Message{ReactionMessage: &waProto.ReactionMessage{}}, "", true},
+		{"deleted", &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String("X")},
+		}}, "", true},
 		{"edited", &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{
 			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
 			EditedMessage: &waProto.Message{Conversation: proto.String("fixed")},
-		}}, "[edited] fixed", false},
+		}}, "", true},
+		{"album announcement", &waProto.Message{AlbumMessage: &waProto.AlbumMessage{ExpectedImageCount: proto.Uint32(3)}}, "", true},
 		{"image", &waProto.Message{ImageMessage: &waProto.ImageMessage{Caption: proto.String("look")}}, "[image] look", false},
-		{"unknown type", &waProto.Message{LocationMessage: &waProto.LocationMessage{}}, "[location]", false},
+		{"voice note", &waProto.Message{AudioMessage: &waProto.AudioMessage{PTT: proto.Bool(true)}}, "[voice note]", false},
+		{"location", &waProto.Message{LocationMessage: &waProto.LocationMessage{
+			DegreesLatitude: proto.Float64(34.0837), DegreesLongitude: proto.Float64(74.7973), Name: proto.String("Lal Chowk"),
+		}}, "Lal Chowk\nhttps://maps.google.com/?q=34.0837,74.7973", false},
+		{"poll", &waProto.Message{PollCreationMessageV3: &waProto.PollCreationMessage{Name: proto.String("Lunch?")}}, "[poll] Lunch?", false},
+		{"unknown type", &waProto.Message{NewsletterAdminInviteMessage: &waProto.NewsletterAdminInviteMessage{}}, "[newsletterAdminInvite]", false},
 	}
 	for _, tc := range cases {
 		got, hidden := displayText(tc.msg, msgstore.Message{}, resolve)
@@ -84,5 +96,12 @@ func TestDisplayText(t *testing.T) {
 
 	if got, hidden := displayText(nil, msgstore.Message{Text: "sent", MediaType: "image"}, resolve); got != "[image] sent" || hidden {
 		t.Errorf("no raw proto: got (%q, %v)", got, hidden)
+	}
+	if got, hidden := displayText(nil, msgstore.Message{Deleted: true}, resolve); got != "[deleted]" || hidden {
+		t.Errorf("deleted row: got (%q, %v)", got, hidden)
+	}
+	edited := &waProto.Message{Conversation: proto.String("fixed")}
+	if got, hidden := displayText(edited, msgstore.Message{Edited: true}, resolve); got != "fixed (edited)" || hidden {
+		t.Errorf("edited row: got (%q, %v)", got, hidden)
 	}
 }
