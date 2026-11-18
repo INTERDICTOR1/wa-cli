@@ -86,11 +86,17 @@ type Client struct {
 	mergeMu    sync.Mutex
 	mergedLIDs map[string]struct{}
 
-	// groupMu guards the group member cache.
-	groupMu      sync.Mutex
-	groupMembers map[string][]memberRef
-	groupsLoaded time.Time
-	groupsBusy   bool
+	// groupMu guards the group member cache and the deletions waiting
+	// for it.
+	groupMu        sync.Mutex
+	groupMembers   map[string][]memberRef
+	groupsLoaded   time.Time
+	groupsBusy     bool
+	pendingRevokes map[string][]pendingRevoke // group -> deletions to check once its members are known
+
+	// background counts goroutines started while ingesting, so tests can
+	// wait for them.
+	background sync.WaitGroup
 
 	// sendMu guards the bookkeeping of outgoing messages.
 	sendMu       sync.Mutex
@@ -99,12 +105,13 @@ type Client struct {
 
 	// Test seams: stand-ins for the parts of whatsmeow the local logic
 	// reads. Nil means "use WA".
-	lidOverride     lidSource
-	contactOverride contactSource
-	decryptOverride secretDecrypter
-	selfJID         types.JID
-	selfLID         types.JID
-	notifyFn        func(title, body string) error
+	lidOverride       lidSource
+	contactOverride   contactSource
+	decryptOverride   secretDecrypter
+	groupInfoOverride func(context.Context, types.JID) (*types.GroupInfo, error)
+	selfJID           types.JID
+	selfLID           types.JID
+	notifyFn          func(title, body string) error
 }
 
 // New builds a Client using the first (or a fresh, unpaired) device from

@@ -5,10 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"mime"
 	"os"
 	"path/filepath"
-	"sort"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -193,7 +192,21 @@ func (c *Client) SaveMedia(ctx context.Context, m msgstore.Message, dir string) 
 		os.Remove(tmpName)
 		return "", waerrors.Wrap(err, "saving download")
 	}
+	markFromInternet(target)
 	return target, nil
+}
+
+// markFromInternet tags a downloaded file the way browsers do on Windows
+// (the "mark of the web"): Windows then checks a program before running
+// it, and Office opens a document read-only with its macros blocked. The
+// tag is a second, named data stream of the file; the file's own content
+// is untouched. Best effort - other systems, and file systems without
+// named streams, are left alone.
+func markFromInternet(path string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	_ = os.WriteFile(path+":Zone.Identifier", []byte("[ZoneTransfer]\r\nZoneId=3\r\n"), 0o644)
 }
 
 // mediaFileNames returns the names to save m's attachment under, in
@@ -237,43 +250,65 @@ func shortID(id string) string {
 	return s
 }
 
-// mimeExtensions are the extensions for the types WhatsApp media
-// usually has; anything else is looked up in the system's MIME table.
+// mimeExtensions are the extensions for the types WhatsApp media and
+// documents usually have. The list is closed on purpose and holds only
+// types that are shown or played: the type is whatever the sender claims,
+// and looking it up in the system's table would let a "video" of type
+// application/hta be saved as a .hta file, which Windows runs.
 var mimeExtensions = map[string]string{
-	"image/jpeg":       ".jpg",
-	"image/png":        ".png",
-	"image/webp":       ".webp",
-	"image/gif":        ".gif",
-	"image/bmp":        ".bmp",
-	"video/mp4":        ".mp4",
-	"video/3gpp":       ".3gp",
-	"video/quicktime":  ".mov",
-	"video/webm":       ".webm",
-	"audio/ogg":        ".ogg",
-	"audio/opus":       ".opus",
-	"audio/mpeg":       ".mp3",
-	"audio/mp4":        ".m4a",
-	"audio/aac":        ".aac",
-	"audio/amr":        ".amr",
-	"audio/wav":        ".wav",
-	"audio/x-wav":      ".wav",
-	"application/pdf":  ".pdf",
-	"application/zip":  ".zip",
-	"text/plain":       ".txt",
-	"application/json": ".json",
+	"image/jpeg":                    ".jpg",
+	"image/png":                     ".png",
+	"image/webp":                    ".webp",
+	"image/gif":                     ".gif",
+	"image/bmp":                     ".bmp",
+	"image/heic":                    ".heic",
+	"image/heif":                    ".heif",
+	"image/tiff":                    ".tiff",
+	"image/avif":                    ".avif",
+	"video/mp4":                     ".mp4",
+	"video/3gpp":                    ".3gp",
+	"video/quicktime":               ".mov",
+	"video/webm":                    ".webm",
+	"video/x-matroska":              ".mkv",
+	"video/x-msvideo":               ".avi",
+	"audio/ogg":                     ".ogg",
+	"audio/opus":                    ".opus",
+	"audio/mpeg":                    ".mp3",
+	"audio/mp4":                     ".m4a",
+	"audio/x-m4a":                   ".m4a",
+	"audio/aac":                     ".aac",
+	"audio/amr":                     ".amr",
+	"audio/wav":                     ".wav",
+	"audio/x-wav":                   ".wav",
+	"audio/flac":                    ".flac",
+	"application/pdf":               ".pdf",
+	"application/zip":               ".zip",
+	"text/plain":                    ".txt",
+	"text/csv":                      ".csv",
+	"application/json":              ".json",
+	"application/rtf":               ".rtf",
+	"text/rtf":                      ".rtf",
+	"text/vcard":                    ".vcf",
+	"text/x-vcard":                  ".vcf",
+	"application/epub+zip":          ".epub",
+	"application/msword":            ".doc",
+	"application/vnd.ms-excel":      ".xls",
+	"application/vnd.ms-powerpoint": ".ppt",
+	"application/vnd.oasis.opendocument.text":                                   ".odt",
+	"application/vnd.oasis.opendocument.spreadsheet":                            ".ods",
+	"application/vnd.oasis.opendocument.presentation":                           ".odp",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   ".docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         ".xlsx",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
 }
 
 // extensionFor returns the file extension (with its dot) for a MIME
-// type, ".bin" when unknown.
+// type, ".bin" for one that isn't in mimeExtensions.
 func extensionFor(mimeType string) string {
 	base, _, _ := strings.Cut(mimeType, ";")
 	base = strings.ToLower(strings.TrimSpace(base))
 	if ext, ok := mimeExtensions[base]; ok {
 		return ext
-	}
-	if exts, err := mime.ExtensionsByType(base); err == nil && len(exts) > 0 {
-		sort.Strings(exts) // the system's order isn't stable
-		return exts[0]
 	}
 	return ".bin"
 }

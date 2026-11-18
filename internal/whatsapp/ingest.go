@@ -97,6 +97,7 @@ func (c *Client) ingestMessage(evt *events.Message) {
 // when a row was really inserted (not for a duplicate).
 func (c *Client) ingest(ctx context.Context, in incoming, replaces string) applied {
 	var res applied
+	retargeted := false
 	switch classOf(in) {
 	case classDrop:
 		return res
@@ -109,25 +110,35 @@ func (c *Client) ingest(ctx context.Context, in incoming, replaces string) appli
 			if c.replaceContent(in, replaces, a, &res) {
 				return res
 			}
-			row.ID = replaces
+			row.ID, retargeted = replaces, true
 		}
 		res.Store = &row
 	}
 	if res.Store != nil && !c.storeRow(res.Store, &res) {
-		c.replacePlaceholder(*res.Store, &res)
+		// Already stored. A message that names the ID it wants to replace
+		// was refused above; the placeholder rule is not a second way in.
+		if !retargeted {
+			c.replacePlaceholder(*res.Store, &res)
+		}
 		res.Store = nil
 	}
 	return res
 }
 
 // replacePlaceholder fills in a row stored as a "can only be seen on
-// your phone" placeholder when the real message turns up after all.
+// your phone" placeholder when the real message turns up after all. Only
+// the placeholder's own sender can fill it: a message ID is chosen by
+// whoever sends it, so anyone in the chat can reuse one, and their words
+// would otherwise be shown under the first sender's name.
 func (c *Client) replacePlaceholder(row msgstore.Message, res *applied) {
 	if c.msgs == nil || contentOf(row).GetPlaceholderMessage() != nil {
 		return
 	}
 	cur, ok, err := c.msgs.Get(row.ChatJID, row.ID)
 	if err != nil || !ok || cur.Deleted || contentOf(cur).GetPlaceholderMessage() == nil {
+		return
+	}
+	if cur.FromMe != row.FromMe || (!row.FromMe && !c.sameUser(row.SenderJID, cur.SenderJID)) {
 		return
 	}
 	cur.MediaType, cur.Text, cur.RawProto = row.MediaType, row.Text, row.RawProto

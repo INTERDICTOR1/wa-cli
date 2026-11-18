@@ -54,7 +54,8 @@ Added
   quality; large files are uploaded from disk as a stream.
 - Full-screen photo viewer using Sixel, the Kitty protocol or iTerm2
   inline images, with a block-character fallback (`internal/termimg`);
-  opening any attachment in the system's default app; saving media.
+  opening photos, videos, audio, PDFs and office documents in the
+  system's default app; saving any attachment.
 - `:name` emoji completion, mouse wheel and click support, a help
   overlay (`F1`), unread count in the window title.
 - Whole history kept (no 48-hour cap) and paged in as you scroll, with
@@ -76,6 +77,28 @@ Changed
   migrate-store`, started automatically), so the long-running TUI never
   carries the memory it takes.
 - New dependency: `golang.org/x/image` (WebP stickers, scaling).
+
+Security
+
+Three flaws in the first version of this overhaul, found by review right
+after it was pushed:
+
+- Opening an attachment handed whatever was downloaded to the system's
+  default app. A document is named by its sender, so "opening"
+  `invoice.pdf.exe` would have run it. Now only types that are shown or
+  played are opened (a fixed list); anything else is saved and never
+  started. A file's extension comes from the type its sender claims only
+  when that type is on a fixed list of harmless ones, and downloads carry
+  Windows' "mark of the web", as files from a browser do.
+- In a group, a "delete for everyone" aimed at someone else's message
+  was applied whenever the member list wasn't loaded, so any member could
+  erase others' messages from your history. It is now applied only once
+  its sender is confirmed to be an admin; the member list is fetched for
+  that if needed, and a claim that can't be checked deletes nothing.
+- A "can only be seen on your phone" placeholder was replaced by any
+  later message with the same ID. Another group member could reuse the ID
+  and have their words shown under the first sender's name. Only the
+  placeholder's own sender can replace it now.
 
 Tests
 

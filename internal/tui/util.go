@@ -195,8 +195,44 @@ func asFilePath(s string) (string, bool) {
 	return filepath.Clean(s), true
 }
 
+// openableExts are the attachment types handed to the system's default
+// app: ones that are shown or played. "Opening" anything else can mean
+// running it - a program, a script, a shortcut, an installer, a web page
+// with scripts, a document with macros - and an attachment's name is the
+// sender's to choose. So the list says what is allowed, not what isn't.
+var openableExts = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true,
+	".heic": true, ".heif": true, ".tif": true, ".tiff": true, ".avif": true,
+	".mp4": true, ".m4v": true, ".mov": true, ".3gp": true, ".webm": true, ".mkv": true, ".avi": true,
+	".ogg": true, ".oga": true, ".opus": true, ".mp3": true, ".m4a": true, ".aac": true,
+	".amr": true, ".wav": true, ".flac": true,
+	".pdf": true, ".txt": true, ".csv": true, ".rtf": true, ".epub": true,
+	".doc": true, ".docx": true, ".xls": true, ".xlsx": true, ".ppt": true, ".pptx": true,
+	".odt": true, ".ods": true, ".odp": true,
+}
+
+// openable reports whether a downloaded attachment may be handed to the
+// system's default app.
+func openable(path string) bool {
+	return openableExts[strings.ToLower(filepath.Ext(path))]
+}
+
+// notOpenedText is the status line for an attachment that wasn't opened.
+func notOpenedText(path string) string {
+	what := "Files of this type"
+	if ext := strings.ToLower(filepath.Ext(path)); len(ext) > 1 {
+		what = oneLine(ext) + " files"
+	}
+	return "Not opened: " + what + " can run code on this computer. Press s to save it instead."
+}
+
+// launch starts the system's default app for a file or link. A variable
+// so that tests can stand in for it.
+var launch = openExternal
+
 // openExternal opens a file or http(s) link with the system's default app.
-// The target is passed as a single argument, never through a shell.
+// The target is passed as a single argument, never through a shell. Files
+// received from others go through openable first.
 func openExternal(target string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {

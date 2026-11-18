@@ -548,7 +548,7 @@ func (m *model) openSelected() tea.Cmd {
 		return tea.Batch(m.info("Downloading…"), saveMediaCmd(m.ctx, m.be, *v, m.opts.MediaDir, purposeOpen))
 	}
 	if url := firstURL(v.Body); url != "" {
-		if err := openExternal(url); err != nil {
+		if err := launch(url); err != nil {
 			return m.fail(err)
 		}
 		return m.info("Opened " + url)

@@ -67,7 +67,10 @@ func (m *model) mediaSaved(msg mediaSavedMsg) tea.Cmd {
 	}
 	switch msg.purpose {
 	case purposeOpen:
-		if err := openExternal(msg.path); err != nil {
+		if !openable(msg.path) {
+			return m.setStatus(notOpenedText(msg.path), true)
+		}
+		if err := launch(msg.path); err != nil {
 			return m.fail(err)
 		}
 		return m.info("Opened " + filepath.Base(msg.path))
@@ -244,10 +247,16 @@ func (v *viewer) key(m *model, msg tea.KeyMsg) tea.Cmd {
 		v.proto = (v.proto + 1) % 4
 		return v.redraw(m)
 	case "o":
-		if err := openExternal(v.path); err != nil {
-			return m.fail(err)
+		if openable(v.path) {
+			if err := launch(v.path); err != nil {
+				return m.fail(err)
+			}
+			return nil
 		}
-		return nil
+		// Sent as a photo, but not a type that is safe to hand over.
+		v.clear(m)
+		m.viewer = nil
+		return tea.Batch(tea.ClearScreen, m.setStatus(notOpenedText(v.path), true))
 	case "s":
 		dst, err := copyFile(v.path, m.opts.DownloadDir)
 		v.clear(m)

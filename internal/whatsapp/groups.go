@@ -129,8 +129,31 @@ func (c *Client) cachedMembers(groupJID string) ([]memberRef, bool) {
 	return members, ok
 }
 
+// fetchMembers loads a group's member list from WhatsApp into the cache.
+func (c *Client) fetchMembers(ctx context.Context, groupJID string) error {
+	jid, err := types.ParseJID(groupJID)
+	if err != nil || jid.Server != types.GroupServer {
+		return waerrors.New("not a group: " + groupJID)
+	}
+	fetch := c.groupInfoOverride
+	if fetch == nil {
+		if c.WA == nil {
+			return waerrors.New("not connected")
+		}
+		fetch = c.WA.GetGroupInfo
+	}
+	info, err := fetch(ctx, jid)
+	if err != nil {
+		return waerrors.Wrap(err, "loading group members")
+	}
+	if c.rememberGroup(info) {
+		c.emit(ChatEvent{JID: groupJID})
+	}
+	return nil
+}
+
 // forgetMembers drops a group's cached member list so the next Members
-// call fetches it again.
+// call (or a deletion that has to be checked) fetches it again.
 func (c *Client) forgetMembers(groupJID string) {
 	c.groupMu.Lock()
 	delete(c.groupMembers, groupJID)
@@ -143,19 +166,8 @@ func (c *Client) forgetMembers(groupJID string) {
 func (c *Client) Members(ctx context.Context, groupJID string) ([]Member, error) {
 	refs, ok := c.cachedMembers(groupJID)
 	if !ok {
-		jid, err := types.ParseJID(groupJID)
-		if err != nil || jid.Server != types.GroupServer {
-			return nil, waerrors.New("not a group: " + groupJID)
-		}
-		if c.WA == nil {
-			return nil, waerrors.New("not connected")
-		}
-		info, err := c.WA.GetGroupInfo(ctx, jid)
-		if err != nil {
-			return nil, waerrors.Wrap(err, "loading group members")
-		}
-		if c.rememberGroup(info) {
-			c.emit(ChatEvent{JID: groupJID})
+		if err := c.fetchMembers(ctx, groupJID); err != nil {
+			return nil, err
 		}
 		refs, _ = c.cachedMembers(groupJID)
 	}

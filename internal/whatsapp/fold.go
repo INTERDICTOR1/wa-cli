@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"strings"
+	"time"
 
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -391,13 +392,32 @@ func (c *Client) applyPollVote(in incoming, targetID string, selected [][]byte, 
 }
 
 func (c *Client) applyRevoke(in incoming, targetID string, res *applied) {
+	c.revoke(in, targetID, res, true)
+}
+
+// revoke applies a "delete for everyone". Anyone may delete their own
+// message; someone else's only a group admin may - and WhatsApp's servers
+// can't check that (they don't see what a message says), so it is checked
+// here. With mayDefer, a deletion whose sender can't be checked yet waits
+// for the group's member list instead of being dropped.
+func (c *Client) revoke(in incoming, targetID string, res *applied, mayDefer bool) {
 	t, ok := c.target(in.ChatJID, targetID)
 	if !ok || t.Deleted {
 		return
 	}
 	if !c.sameSender(in, t) {
-		// Only a group admin may delete someone else's message.
-		if !isGroupJID(t.ChatJID) || !c.mayBeAdmin(t.ChatJID, in) {
+		if !isGroupJID(t.ChatJID) {
+			return
+		}
+		switch c.adminOf(t.ChatJID, in) {
+		case adminNo:
+			return
+		case adminUnknown:
+			// Deleting can't be undone, so an unchecked claim deletes
+			// nothing.
+			if mayDefer {
+				c.deferRevoke(t.ChatJID, in, targetID)
+			}
 			return
 		}
 	}
@@ -412,23 +432,98 @@ func (c *Client) applyRevoke(in incoming, targetID string, res *applied) {
 	}
 }
 
-// mayBeAdmin reports whether the sender of in could be an admin of the
-// group: true unless the group's member list is loaded and says no.
-func (c *Client) mayBeAdmin(groupJID string, in incoming) bool {
+// adminAnswer is whether someone is an admin of a group.
+type adminAnswer int
+
+const (
+	adminUnknown adminAnswer = iota // the group's member list isn't loaded
+	adminNo
+	adminYes
+)
+
+// adminOf reports whether the sender of in is an admin of the group.
+func (c *Client) adminOf(groupJID string, in incoming) adminAnswer {
+	if in.FromMe {
+		// From one of your own devices, which checked your rights before
+		// sending. (The member list holds the other members only.)
+		return adminYes
+	}
 	members, loaded := c.cachedMembers(groupJID)
 	if !loaded {
-		return true
-	}
-	if in.FromMe {
-		// The list holds the other members; your own rights aren't in it.
-		return true
+		return adminUnknown
 	}
 	for _, m := range members {
-		if c.sameUser(m.JID, in.SenderJID) {
-			return m.Admin
+		if c.sameUser(m.JID, in.SenderJID) && m.Admin {
+			return adminYes
 		}
 	}
-	return false
+	return adminNo
+}
+
+// pendingRevoke is a deletion of someone else's message that waits for
+// the group's member list, to check that its sender is an admin.
+type pendingRevoke struct {
+	in       incoming
+	targetID string
+}
+
+// maxPendingRevokes bounds how many deletions wait per group. Moderation
+// is a handful of them; more than this is a flood, and is dropped.
+const maxPendingRevokes = 32
+
+// revokeCheckTimeout is how long fetching a member list may take.
+const revokeCheckTimeout = 30 * time.Second
+
+// deferRevoke holds a deletion until the group's member list has been
+// fetched (one fetch per group, however many are waiting), then applies
+// it if its sender turns out to be an admin. Deletions that aren't
+// arriving live have nothing current to be checked against and are
+// dropped: the message stays.
+func (c *Client) deferRevoke(groupJID string, in incoming, targetID string) {
+	if in.History {
+		return
+	}
+	c.groupMu.Lock()
+	queue, fetching := c.pendingRevokes[groupJID]
+	if len(queue) < maxPendingRevokes {
+		if c.pendingRevokes == nil {
+			c.pendingRevokes = map[string][]pendingRevoke{}
+		}
+		c.pendingRevokes[groupJID] = append(queue, pendingRevoke{in, targetID})
+	}
+	c.groupMu.Unlock()
+	if fetching {
+		return
+	}
+	c.background.Add(1)
+	go func() {
+		defer c.background.Done()
+		c.settleRevokes(groupJID)
+	}()
+}
+
+// settleRevokes fetches a group's member list and decides the deletions
+// waiting for it. If the list can't be fetched they are dropped.
+func (c *Client) settleRevokes(groupJID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), revokeCheckTimeout)
+	defer cancel()
+	err := c.fetchMembers(ctx, groupJID)
+
+	c.groupMu.Lock()
+	queue := c.pendingRevokes[groupJID]
+	delete(c.pendingRevokes, groupJID)
+	c.groupMu.Unlock()
+	if err != nil {
+		c.log.Warnf("left %d message(s) in %s undeleted: couldn't check who may delete them: %v", len(queue), groupJID, err)
+		return
+	}
+	for _, p := range queue {
+		var res applied
+		c.foldMu.Lock()
+		c.revoke(p.in, p.targetID, &res, false)
+		c.foldMu.Unlock()
+		c.announce(p.in, res, "")
+	}
 }
 
 func (c *Client) applyEdit(in incoming, targetID string, edited *waProto.Message, res *applied) {

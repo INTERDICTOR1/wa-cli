@@ -126,7 +126,7 @@ on the right. Everything stays on your machine; it uses well under
 | | `Ctrl+F` / `Ctrl+G` | search this chat / chat and group info |
 | A selected message | `Enter` | view a photo full screen, open other media or a link, retry a failed send, otherwise reply |
 | | `r` `e` `E` `d` `f` `c` | reply, react, edit, delete (for everyone or just here), forward, copy |
-| | `o` / `s` | open with the default app / save to `Downloads/WhatsApp` |
+| | `o` / `s` | open with the default app (photos, video, audio, PDFs and office documents; other files are never started, only saved) / save to `Downloads/WhatsApp` |
 | Anywhere | `F1` | all keys |
 | | `Ctrl+C` | quit |
 
