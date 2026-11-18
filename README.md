@@ -133,7 +133,9 @@ on the right. Everything stays on your machine; it uses well under
 Also there: delivery ticks (✓ sent, ✓✓ delivered, blue ✓✓ read), "typing…"
 and "online / last seen", replies shown with what they quote, reactions
 and edits applied to the message they belong to, polls with their tally,
-drafts kept per chat, unread counts in the window title, mouse wheel
+drafts kept per chat, unread counts in the window title, a RAM counter
+in the top right (the figure Task Manager shows, with the peak; red above
+100 MB), mouse wheel
 scrolling and clicking, and older history loaded as you scroll up (asked
 from your phone when it isn't stored locally).
 

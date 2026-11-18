@@ -21,6 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/codebyoketch/wa-cli/internal/memusage"
 	"github.com/codebyoketch/wa-cli/internal/termimg"
 	"github.com/codebyoketch/wa-cli/internal/whatsapp"
 )
@@ -108,6 +109,10 @@ type model struct {
 	typing   map[string]map[string]typingInfo // chat -> sender -> state
 	focused  bool                             // the terminal window has focus
 
+	// RAM this process uses (see memusage), sampled every memInterval;
+	// memPeak is the highest sample so far. 0 = not measured.
+	mem, memPeak uint64
+
 	status    string
 	statusErr bool
 	statusSeq int
@@ -156,7 +161,51 @@ func newModel(ctx context.Context, be Backend, opts Options, out io.Writer) *mod
 // Init satisfies tea.Model: load the chat list right away so the first
 // frame has content while the connection comes up.
 func (m *model) Init() tea.Cmd {
-	return loadChatsCmd(m.ctx, m.be)
+	return tea.Batch(loadChatsCmd(m.ctx, m.be), sampleMemCmd)
+}
+
+// memInterval is how often the RAM counter in the header is updated.
+const memInterval = 2 * time.Second
+
+// memBudget is the RAM wa-cli aims to stay under; the counter turns red
+// above it.
+const memBudget = 100 << 20
+
+type memSampleMsg struct {
+	bytes uint64
+	ok    bool
+}
+
+func sampleMemCmd() tea.Msg {
+	n, ok := memusage.Current()
+	return memSampleMsg{n, ok}
+}
+
+// memSampled records a sample and schedules the next one.
+func (m *model) memSampled(msg memSampleMsg) tea.Cmd {
+	if !msg.ok {
+		return nil // can't be measured here: no counter, no more sampling
+	}
+	m.mem = msg.bytes
+	m.memPeak = max(m.memPeak, msg.bytes)
+	return tea.Tick(memInterval, func(time.Time) tea.Msg { return sampleMemCmd() })
+}
+
+// memText is the header's RAM counter, e.g. "RAM 33 MB · peak 41 MB".
+func (m *model) memText() string {
+	if m.mem == 0 {
+		return ""
+	}
+	mb := func(n uint64) string { return itoa(int((n+(1<<19))>>20)) + " MB" }
+	style := dimStyle
+	if m.mem > memBudget {
+		style = statusErrStyle
+	}
+	text := "RAM " + mb(m.mem)
+	if m.memPeak > m.mem+(1<<20) {
+		text += " · peak " + mb(m.memPeak)
+	}
+	return style.Render(text)
 }
 
 // Update satisfies tea.Model: the single place every event lands.
@@ -248,6 +297,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case redrawMsg:
 		return m, nil
+
+	case memSampleMsg:
+		return m, m.memSampled(msg)
 
 	case statusClearMsg:
 		if msg.seq == m.statusSeq {

@@ -58,6 +58,10 @@ Added
   system's default app; saving any attachment.
 - `:name` emoji completion, mouse wheel and click support, a help
   overlay (`F1`), unread count in the window title.
+- A RAM counter at the top of the TUI (`internal/memusage`): the
+  process's private working set on Windows (Task Manager's figure), RSS
+  on Linux, updated every 2 seconds with the highest value seen; it turns
+  red above 100 MB.
 - Whole history kept (no 48-hour cap) and paged in as you scroll, with
   older messages requested from the phone on demand.
 - Config: `sendReadReceipts` and `sendPresence` (both off unless you

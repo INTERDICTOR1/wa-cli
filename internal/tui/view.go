@@ -105,7 +105,10 @@ func (m *model) renderHeader(l layout) string {
 	if m.newBelow > 0 {
 		right = statusStyle.Render("↓ "+itoa(m.newBelow)+" new") + " " + right
 	}
-	return " " + spread(left, right, l.paneW-2)
+	if mem := m.memText(); mem != "" {
+		right = strings.TrimSpace(right + "  " + mem)
+	}
+	return " " + spread(left, truncate(right, l.paneW-2), l.paneW-2)
 }
 
 // typingText describes who is typing in a chat right now, or "".
