@@ -4,16 +4,26 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
 // withTempConfigHome points os.UserConfigDir() (and therefore every
 // function in this package) at a fresh temp directory for the test, the
 // same way a real user's XDG_CONFIG_HOME scopes it.
+//
+// os.UserConfigDir reads a different variable on each system:
+// XDG_CONFIG_HOME on Linux, APPDATA on Windows, HOME on macOS. All of
+// them must be redirected - setting only the Linux one let these tests
+// overwrite the real config file on Windows.
 func withTempConfigHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", home)
+	}
 	return home
 }
 
@@ -24,8 +34,10 @@ func TestDir_CreatesAndReturnsWaSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dir: %v", err)
 	}
-	if want := filepath.Join(home, "wa"); dir != want {
-		t.Fatalf("Dir() = %q, want %q", dir, want)
+	// Directly under the temp home on Linux and Windows; macOS adds
+	// "Library/Application Support" in between.
+	if rel, err := filepath.Rel(home, dir); err != nil || strings.HasPrefix(rel, "..") || filepath.Base(dir) != "wa" {
+		t.Fatalf("Dir() = %q, want a \"wa\" directory inside %q", dir, home)
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		t.Fatalf("Dir() did not create the directory: %v", err)

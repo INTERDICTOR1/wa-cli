@@ -3,14 +3,27 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/codebyoketch/wa-cli/internal/config"
 )
 
+// withTempConfigHome points the config directory at a fresh temp
+// directory for the test, so it can never touch the user's real one.
+//
+// os.UserConfigDir reads a different variable on each system:
+// XDG_CONFIG_HOME on Linux, APPDATA on Windows, HOME on macOS. All of
+// them must be redirected - setting only the Linux one let these tests
+// overwrite the real config file on Windows.
 func withTempConfigHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", home)
+	}
 }
 
 func TestNew_NoConfigFile_UsesDefaults(t *testing.T) {

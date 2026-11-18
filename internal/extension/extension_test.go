@@ -53,9 +53,19 @@ func runGit(t *testing.T, dir string, args ...string) {
 // withTempExtensionsDir points config.Dir() (and therefore extension.Dir())
 // at a fresh temp directory for the duration of the test, the same way a
 // real user's XDG_CONFIG_HOME would scope it.
+//
+// os.UserConfigDir reads a different variable on each system:
+// XDG_CONFIG_HOME on Linux, APPDATA on Windows, HOME on macOS. All of
+// them must be redirected - setting only the Linux one let these tests
+// overwrite the real config file on Windows.
 func withTempExtensionsDir(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", home)
+	}
 }
 
 func TestInstall_Simple(t *testing.T) {
