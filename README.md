@@ -10,10 +10,8 @@
  ██ ██  █     █        █████  ███████ ███ 
 ```
 
-[![CI](https://github.com/codebyoketch/wa-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/codebyoketch/wa-cli/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/codebyoketch/wa-cli)](https://github.com/codebyoketch/wa-cli/releases)
-[![Go Reference](https://pkg.go.dev/badge/github.com/codebyoketch/wa-cli.svg)](https://pkg.go.dev/github.com/codebyoketch/wa-cli)
-[![Go Report Card](https://goreportcard.com/badge/github.com/codebyoketch/wa-cli)](https://goreportcard.com/report/github.com/codebyoketch/wa-cli)
+[![CI](https://github.com/INTERDICTOR1/wa-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/INTERDICTOR1/wa-cli/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/wa-tui)](https://www.npmjs.com/package/wa-tui)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 A WhatsApp client for your terminal, built in Go on top of [whatsmeow](https://github.com/tulir/whatsmeow).
@@ -45,43 +43,25 @@ manage chats/contacts/groups/media, all from the command line — with
 
 ## Install
 
-**Prebuilt binaries** (Linux/macOS/Windows, amd64/arm64) are on the
-[Releases page](https://github.com/codebyoketch/wa-cli/releases).
-Download the archive for your platform, extract it, and put the `wa`
-binary somewhere on your `PATH`.
-
 ```sh
-# Homebrew (macOS/Linux)
-brew install codebyoketch/tap/wa-cli
-
-# Scoop (Windows)
-scoop bucket add wa-cli https://github.com/codebyoketch/scoop-bucket
-scoop install wa-cli
-
-# Docker
-docker run -it -v wa-data:/data ghcr.io/codebyoketch/wa-cli:latest login
+npm i -g wa-tui
+wa login    # scan the QR code with WhatsApp on your phone
+wa          # open the chat app
 ```
 
-> **Homebrew on Linux:** if you don't already have `brew`, it isn't
-> preinstalled — get it from [brew.sh](https://brew.sh) first
-> (`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`).
-> The installer prints a "Next steps" section with a `PATH` line you
-> need to run before `brew` works in your current shell — usually
-> `eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv bash)"`, added
-> to `~/.bashrc` (or your shell's equivalent) so it persists across
-> terminals. It also asks for `build-essential` and `bubblewrap` via
-> `apt`, needed to install some formulae on Linux.
+Works on Windows, macOS and Linux (x64 and arm64); npm installs a
+prebuilt binary, nothing to compile. Update with the same command. wa
+shows "update" in its header when a new version is out. Keep it current,
+because WhatsApp stops accepting old versions.
 
-Or with Go 1.25+ installed:
+This is the maintained continuation of
+[codebyoketch/wa-cli](https://github.com/codebyoketch/wa-cli), whose
+last release (v1.0.0) WhatsApp no longer accepts.
 
-```sh
-go install github.com/codebyoketch/wa-cli@latest
-```
-
-Or build from source:
+Or build from source (Go 1.26+):
 
 ```sh
-git clone https://github.com/codebyoketch/wa-cli.git
+git clone https://github.com/INTERDICTOR1/wa-cli.git
 cd wa-cli
 make build   # binary at ./bin/wa
 ```

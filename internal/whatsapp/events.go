@@ -10,6 +10,7 @@ import (
 
 	"github.com/codebyoketch/wa-cli/internal/chatstore"
 	"github.com/codebyoketch/wa-cli/internal/msgstore"
+	"github.com/codebyoketch/wa-cli/internal/update"
 )
 
 // handleEvent is the whatsmeow event handler: it keeps the local stores
@@ -54,7 +55,7 @@ func (c *Client) handleEvent(evt interface{}) {
 	case *events.TemporaryBan:
 		c.emit(ConnEvent{State: ConnDisconnected, Detail: v.String()})
 	case *events.ClientOutdated:
-		c.emit(ConnEvent{State: ConnDisconnected, Detail: "WhatsApp rejected this client as outdated: update wa-cli"})
+		c.emit(ConnEvent{State: ConnDisconnected, Detail: "WhatsApp rejected this version of wa as outdated. Quit and run: " + update.InstallCommand})
 
 	case *events.PushName, *events.BusinessName, *events.Contact:
 		c.invalidateNames()

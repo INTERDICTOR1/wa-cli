@@ -105,6 +105,9 @@ func (m *model) renderHeader(l layout) string {
 	if m.newBelow > 0 {
 		right = statusStyle.Render("↓ "+itoa(m.newBelow)+" new") + " " + right
 	}
+	if up := m.updateText(); up != "" {
+		right = strings.TrimSpace(up + "  " + right)
+	}
 	if mem := m.memText(); mem != "" {
 		right = strings.TrimSpace(right + "  " + mem)
 	}

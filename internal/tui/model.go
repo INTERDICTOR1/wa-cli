@@ -17,12 +17,14 @@ package tui
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/codebyoketch/wa-cli/internal/memusage"
 	"github.com/codebyoketch/wa-cli/internal/termimg"
+	"github.com/codebyoketch/wa-cli/internal/update"
 	"github.com/codebyoketch/wa-cli/internal/whatsapp"
 )
 
@@ -44,6 +46,8 @@ type Options struct {
 	ImageProtocol termimg.Protocol
 	MediaDir      string // where media opened for viewing is kept
 	DownloadDir   string // where "save" puts files
+	// NewVersion, once set, holds a newer published version of wa.
+	NewVersion *atomic.Pointer[string]
 }
 
 type model struct {
@@ -192,6 +196,18 @@ func (m *model) memSampled(msg memSampleMsg) tea.Cmd {
 }
 
 // memText is the header's RAM counter, e.g. "RAM 33 MB · peak 41 MB".
+// updateText offers a newer published wa, or "".
+func (m *model) updateText() string {
+	if m.opts.NewVersion == nil {
+		return ""
+	}
+	v := m.opts.NewVersion.Load()
+	if v == nil {
+		return ""
+	}
+	return statusStyle.Render("update " + *v + ": " + update.InstallCommand)
+}
+
 func (m *model) memText() string {
 	if m.mem == 0 {
 		return ""
@@ -408,6 +424,10 @@ func (m *model) handleEvent(ev whatsapp.Event) tea.Cmd {
 			m.status, m.statusErr = "This device was unlinked. Quit and run 'wa login' again.", true
 		case whatsapp.ConnReplaced:
 			m.status, m.statusErr = "WhatsApp was opened with this login somewhere else (another wa running?).", true
+		case whatsapp.ConnDisconnected:
+			if ev.Detail != "" {
+				m.status, m.statusErr = ev.Detail, true
+			}
 		}
 	}
 	return nil

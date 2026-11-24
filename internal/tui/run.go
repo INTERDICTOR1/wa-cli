@@ -20,6 +20,8 @@ import (
 	"github.com/codebyoketch/wa-cli/internal/msgstore"
 	"github.com/codebyoketch/wa-cli/internal/store"
 	"github.com/codebyoketch/wa-cli/internal/termimg"
+	"github.com/codebyoketch/wa-cli/internal/update"
+	"github.com/codebyoketch/wa-cli/internal/version"
 	"github.com/codebyoketch/wa-cli/internal/whatsapp"
 )
 
@@ -116,6 +118,12 @@ func Run(a *app.App) error {
 	if opts.DownloadDir == "" {
 		opts.DownloadDir = downloadsDir()
 	}
+	opts.NewVersion = new(atomic.Pointer[string])
+	go func() {
+		if v := update.Newer(ctx, a.Config.DataDir, version.Version); v != "" {
+			opts.NewVersion.Store(&v)
+		}
+	}()
 	debug.SetMemoryLimit(memoryLimit)
 
 	if os.Getenv("WA_DEMO") == "1" {

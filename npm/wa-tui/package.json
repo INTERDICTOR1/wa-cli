@@ -1,0 +1,21 @@
+{
+  "name": "wa-tui",
+  "version": "0.0.0",
+  "description": "WhatsApp in your terminal: a full-screen chat app and a scriptable CLI",
+  "keywords": ["whatsapp", "tui", "cli", "terminal", "chat"],
+  "homepage": "https://github.com/INTERDICTOR1/wa-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/INTERDICTOR1/wa-cli.git"
+  },
+  "bugs": "https://github.com/INTERDICTOR1/wa-cli/issues",
+  "license": "MIT",
+  "bin": {
+    "wa": "bin/wa.js"
+  },
+  "files": ["bin", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {}
+}
