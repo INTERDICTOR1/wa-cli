@@ -127,6 +127,12 @@ func New(ctx context.Context, container *sqlstore.Container, log waLog.Logger, c
 	}
 	clientLog := newQuietLogger(waLog.Stdout("Client", "WARN", true))
 	waClient := whatsmeow.NewClient(device, clientLog)
+	// Keep sent messages on disk (7 days, pruned by whatsmeow) so a device
+	// that couldn't decrypt one, typically a WhatsApp Web tab that comes
+	// online later, can still get it re-sent after wa restarts. Without
+	// this only an in-memory cache answers, and those devices never show
+	// the message.
+	waClient.UseRetryMessageStore = true
 	c := &Client{WA: waClient, log: log, chats: chats, msgs: msgs, wantOnline: true}
 
 	if chats != nil || msgs != nil {
