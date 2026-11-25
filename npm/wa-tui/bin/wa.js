@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Runs the native wa binary that npm installed for this platform (one of
-// the wa-tui-<os>-<cpu> packages listed in optionalDependencies).
+// the @interdictor/wa-tui-<os>-<cpu> packages listed in optionalDependencies).
 "use strict";
 
 const { spawnSync } = require("child_process");
 const fs = require("fs");
 
-const pkg = `wa-tui-${process.platform}-${process.arch}`;
+const pkg = `@interdictor/wa-tui-${process.platform}-${process.arch}`;
 const exe = process.platform === "win32" ? "wa.exe" : "wa";
 
 let bin;

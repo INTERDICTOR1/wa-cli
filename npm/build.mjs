@@ -5,9 +5,12 @@
 //   node npm/build.mjs 1.1.0 --pack      also make .tgz files (for local testing)
 //   node npm/build.mjs 1.1.0 --publish   also publish to npm
 //
-// One package per platform carries the prebuilt binary (wa-tui-<os>-<cpu>,
-// installed only on matching machines via "os"/"cpu"); the main wa-tui
-// package lists them all as optionalDependencies and runs the right one.
+// One package per platform carries the prebuilt binary,
+// @interdictor/wa-tui-<os>-<cpu>, installed only on matching machines
+// via "os"/"cpu". They are scoped because npm's spam filter rejects a
+// batch of similar new unscoped names. The main wa-tui package lists them
+// all as optionalDependencies and runs the right one. Publishing skips
+// versions already on npm, so a run that stopped halfway can be repeated.
 // The .tgz files are written here rather than by `npm pack`, so the Unix
 // binaries keep their executable bit even when built on Windows.
 
@@ -16,6 +19,9 @@ import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+// The npm scope of the platform packages; bin/wa.js names it too.
+const scope = "@interdictor";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -52,8 +58,8 @@ fs.rmSync(dist, { recursive: true, force: true });
 const dirs = [];
 
 for (const [os, cpu, goos, goarch] of targets) {
-  const name = `wa-tui-${os}-${cpu}`;
-  const dir = path.join(dist, name);
+  const name = `${scope}/wa-tui-${os}-${cpu}`;
+  const dir = path.join(dist, `wa-tui-${os}-${cpu}`);
   const exe = os === "win32" ? "wa.exe" : "wa";
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
   console.log(`building ${name}`);
@@ -94,16 +100,29 @@ dirs.push(mainDir); // last: its dependencies must be published first
 for (const dir of dirs) {
   if (!pack && !publish) continue;
   const { name } = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
-  const tgz = path.join(dist, `${name}-${version}.tgz`);
+  const tgz = path.join(dist, `${path.basename(dir)}-${version}.tgz`);
   fs.writeFileSync(tgz, tarball(dir));
   console.log(`packed ${path.basename(tgz)}`);
-  if (publish) {
+  if (publish && published(name)) {
+    console.log(`${name}@${version} is already on npm, skipping`);
+  } else if (publish) {
     // Through the shell on Windows, where npm is a .cmd script.
     const win = process.platform === "win32";
     run(win ? `npm publish "${tgz}" --access public` : "npm", win ? [] : ["publish", tgz, "--access", "public"], { shell: win });
   }
 }
 console.log(`done: ${dirs.length} packages in ${dist}`);
+
+// published reports whether this version of name is already on npm, so a
+// publish that stopped halfway can simply be run again.
+function published(name) {
+  try {
+    const out = execFileSync(`npm view ${name}@${version} version`, { encoding: "utf8", shell: true, stdio: ["ignore", "pipe", "ignore"] });
+    return out.trim() === version;
+  } catch {
+    return false;
+  }
+}
 
 // tarball returns dir as an npm package .tgz: every file under
 // "package/", files in bin/ executable, fixed owner and date (as npm does).
