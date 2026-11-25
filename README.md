@@ -48,6 +48,8 @@ make build   # puts the binary at ./bin/wa
 
 Run `wa` with nothing after it. Your chats are on the left and the open conversation is on the right. Everything stays on your machine, and the top right corner shows how much RAM it's using.
 
+It's also a lot lighter than WhatsApp Web. On my laptop, the WhatsApp Web tab in Firefox sits around 1 GB of RAM and 120 to 140% CPU. wa sits around 50 MB, peaks at about 100 MB, and uses about 2% CPU while it waits for messages.
+
 Start typing to search your chats and contacts. Picking a contact starts a new chat. The arrow keys move through the list, and the highlighted chat is previewed without being marked as read. Enter or Tab opens it.
 
 While writing, Enter sends and Shift+Enter adds a new line. Pasted text keeps its line breaks and goes out as one message. Type @ and a name to mention someone in a group, or : and a name to pick an emoji, like :thumbsup. To attach a file, press Ctrl+O or drag it onto the terminal. Alt+V attaches whatever picture is on your clipboard, like a screenshot (Windows only for now). Ctrl+D sends the attachment as a document instead.
