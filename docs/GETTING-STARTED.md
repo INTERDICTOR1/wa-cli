@@ -1,11 +1,10 @@
-# WhatsApp in your terminal: getting started
+# Getting started
 
-Takes about 2 minutes. Works on Windows, macOS and Linux.
+This is WhatsApp in your terminal. It started as codebyoketch/wa-cli, which isn't updated anymore, so I picked it up and I'm maintaining it here. Setup takes a couple of minutes and works on Windows, Mac and Linux.
 
-## 1. Install
+## Install
 
-You need Node.js (any recent version). If `node -v` doesn't print a
-version, install it from [nodejs.org](https://nodejs.org) first.
+You need Node.js. If `node -v` doesn't print a version, install it from [nodejs.org](https://nodejs.org) first. Then run:
 
 ```sh
 npm i -g wa-terminal
@@ -13,73 +12,30 @@ npm i -g wa-terminal
 
 That gives you the `wa` command.
 
-## 2. Link your WhatsApp
+## Link your WhatsApp
 
-```sh
-wa login
-```
+Run `wa login` and a QR code shows up in the terminal. On your phone, open WhatsApp, go to Settings, then Linked devices, then Link a device, and scan it. wa is now linked the same way WhatsApp Web is, so your phone doesn't have to stay online.
 
-A QR code appears in the terminal. On your phone, open WhatsApp and go to
-**Settings → Linked devices → Link a device**, then scan the code.
-wa becomes one of your linked devices, just like WhatsApp Web. Your phone
-doesn't need to stay online afterwards.
+## Use it
 
-## 3. Chat
+Run `wa` to open your chats. The first start takes a minute while it loads everything.
 
-```sh
-wa
-```
+Start typing to search your chats, use the arrow keys to move, and press Enter to open one. Type your message and press Enter to send it, or Shift+Enter for a new line. To attach a file, press Ctrl+O or just drag the file onto the terminal. Press the up arrow while typing to pick a message, then r to reply, e to react, f to forward or d to delete. Esc takes you back to the chat list, F1 shows every key, and Ctrl+C quits.
 
-The first start loads your chats, which can take a minute.
+Read receipts and online status are off by default, so people won't see blue ticks or that you're online. If you want them, run `wa config set sendReadReceipts true` and `wa config set sendPresence true`.
 
-| Key | Does |
-|---|---|
-| type | search chats and contacts |
-| ↑ ↓ | move through chats |
-| Enter | open the chat and start typing |
-| Enter (while typing) | send |
-| Shift+Enter | new line |
-| Ctrl+O | attach a file (or drop a file on the terminal) |
-| ↑ (while typing) | pick a message, then **r** reply, **e** react, **f** forward, **d** delete |
-| Esc | back to the chat list |
-| F1 | every key |
-| Ctrl+C | quit |
-
-Read receipts and "online" are **off** by default: people don't see blue
-ticks or that you're online. Turn them on with
-`wa config set sendReadReceipts true` and `wa config set sendPresence true`.
-
-## Also from the command line
-
-```sh
-wa chat list                       # your chats
-wa chat send "Mom" "on my way"     # send to a chat by name
-wa watch                           # print new messages as they arrive
-```
-
-Run `wa --help` for everything else.
+You can also use it without the full screen view. `wa chat list` shows your chats, `wa chat send "Mom" "on my way"` sends a message, and `wa watch` prints new messages as they come in. `wa --help` lists everything else.
 
 ## Updating
 
-When a new version is out, wa shows **update** in its top bar. Run the
-install command again:
+When there's a new version, wa shows it in the top bar. Run `npm i -g wa-terminal` again to update. Don't skip updates for long, because WhatsApp stops accepting old versions and wa will just say offline.
 
-```sh
-npm i -g wa-terminal
-```
+## If something's off
 
-Keep it updated: WhatsApp stops accepting old versions, and then wa shows
-"offline".
+If it's stuck on offline, update and restart it. If it says connected elsewhere, you have another wa open with the same login, so close one. If it says logged out, run `wa login` again.
 
-## Something wrong?
+To stop using it, run `wa logout` and then `npm rm -g wa-terminal`. You can also remove it from your phone under Linked devices.
 
-- **Stuck on "offline"**: update (above), then restart wa.
-- **"connected elsewhere"**: another wa window is open with the same
-  login. Close one.
-- **Logged out**: run `wa login` again.
-- **Stop using it**: `wa logout`, then `npm rm -g wa-terminal`. You can
-  also remove it from your phone under Linked devices.
+If you find a bug or want something added, open an issue at [github.com/INTERDICTOR1/wa-cli/issues](https://github.com/INTERDICTOR1/wa-cli/issues).
 
-Bugs and ideas: [github.com/INTERDICTOR1/wa-cli/issues](https://github.com/INTERDICTOR1/wa-cli/issues)
-
-wa is not affiliated with WhatsApp or Meta.
+This isn't affiliated with WhatsApp or Meta.
