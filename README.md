@@ -49,6 +49,9 @@ wa login    # scan the QR code with WhatsApp on your phone
 wa          # open the chat app
 ```
 
+New here? The 2-minute walkthrough:
+[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
+
 Works on Windows, macOS and Linux (x64 and arm64); npm installs a
 prebuilt binary, nothing to compile. Update with the same command. wa
 shows "update" in its header when a new version is out. Keep it current,
