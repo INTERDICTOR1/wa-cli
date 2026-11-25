@@ -8,11 +8,12 @@
 // One package per platform carries the prebuilt binary (wa-tui-<os>-<cpu>,
 // installed only on matching machines via "os"/"cpu"); the main wa-tui
 // package lists them all as optionalDependencies and runs the right one.
-// Publish from Linux or macOS (CI does): packing on Windows drops the
-// executable bit from the Unix binaries.
+// The .tgz files are written here rather than by `npm pack`, so the Unix
+// binaries keep their executable bit even when built on Windows.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -85,9 +86,56 @@ main.version = version;
 fs.writeFileSync(path.join(mainDir, "package.json"), JSON.stringify(main, null, 2) + "\n");
 dirs.push(mainDir); // last: its dependencies must be published first
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 for (const dir of dirs) {
-  if (pack) run(npm, ["pack", "--pack-destination", dist], { cwd: dir, shell: process.platform === "win32" });
-  if (publish) run(npm, ["publish", "--access", "public"], { cwd: dir, shell: process.platform === "win32" });
+  if (!pack && !publish) continue;
+  const { name } = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+  const tgz = path.join(dist, `${name}-${version}.tgz`);
+  fs.writeFileSync(tgz, tarball(dir));
+  console.log(`packed ${path.basename(tgz)}`);
+  if (publish) {
+    // Through the shell on Windows, where npm is a .cmd script.
+    const win = process.platform === "win32";
+    run(win ? `npm publish "${tgz}" --access public` : "npm", win ? [] : ["publish", tgz, "--access", "public"], { shell: win });
+  }
 }
 console.log(`done: ${dirs.length} packages in ${dist}`);
+
+// tarball returns dir as an npm package .tgz: every file under
+// "package/", files in bin/ executable, fixed owner and date (as npm does).
+function tarball(dir) {
+  const files = [];
+  const walk = (rel) => {
+    for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(r);
+      else files.push(r);
+    }
+  };
+  walk("");
+  files.sort();
+  const blocks = [];
+  for (const rel of files) {
+    const data = fs.readFileSync(path.join(dir, rel));
+    const name = `package/${rel}`;
+    if (Buffer.byteLength(name) > 100) throw new Error(`path too long for tar: ${name}`);
+    const h = Buffer.alloc(512);
+    const field = (off, len, str) => h.write(str, off, len, "ascii");
+    const octal = (off, len, n) => field(off, len, n.toString(8).padStart(len - 1, "0") + "\0");
+    field(0, 100, name);
+    octal(100, 8, rel.startsWith("bin/") ? 0o755 : 0o644);
+    octal(108, 8, 0);
+    octal(116, 8, 0);
+    octal(124, 12, data.length);
+    octal(136, 12, 499162500); // 1985-10-26, npm's fixed mtime
+    field(148, 8, "        ");
+    field(156, 1, "0");
+    field(257, 6, "ustar\0");
+    field(263, 2, "00");
+    let sum = 0;
+    for (const b of h) sum += b;
+    field(148, 8, sum.toString(8).padStart(6, "0") + "\0 ");
+    blocks.push(h, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  blocks.push(Buffer.alloc(1024));
+  return zlib.gzipSync(Buffer.concat(blocks), { level: 9 });
+}

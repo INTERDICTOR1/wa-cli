@@ -1,8 +1,8 @@
 name: Release
 
 # Push a tag like v1.2.0 to publish that version to npm as wa-tui.
-# Needs the NPM_TOKEN secret (an npm "Automation" or granular token with
-# publish rights) under Settings > Secrets and variables > Actions.
+# Uses npm trusted publishing: no token is stored. Each wa-tui package
+# on npm trusts this workflow (set with `npm trust github`).
 
 on:
   push:
@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # lets npm verify this workflow is the publisher
 
 jobs:
   npm:
@@ -25,10 +26,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Use an npm with trusted publishing
+        run: npm install -g npm@latest
 
       - name: Build and publish to npm
         run: node npm/build.mjs "${GITHUB_REF_NAME}" --publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
