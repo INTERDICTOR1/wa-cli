@@ -274,6 +274,9 @@ func (c *Client) transmit(ctx context.Context, chat types.JID, id string, msg *w
 
 // finishSend marks a pending row sent or failed and announces the change.
 func (c *Client) finishSend(chatJID, id string, sendErr error) {
+	if sendErr != nil {
+		c.log.Warnf("sending %s to %s failed: %v", id, chatJID, sendErr)
+	}
 	if c.msgs != nil {
 		var err error
 		if sendErr != nil {
