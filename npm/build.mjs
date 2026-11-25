@@ -80,7 +80,12 @@ for (const [os, cpu, goos, goarch] of targets) {
 }
 
 const mainDir = path.join(dist, "wa-tui");
-fs.cpSync(path.join(here, "wa-tui"), mainDir, { recursive: true });
+// Only these files: anything else that lands in npm/wa-tui (an .npmrc,
+// an .env) must never be published.
+for (const f of ["bin/wa.js", "README.md"]) {
+  fs.mkdirSync(path.dirname(path.join(mainDir, f)), { recursive: true });
+  fs.copyFileSync(path.join(here, "wa-tui", f), path.join(mainDir, f));
+}
 fs.copyFileSync(path.join(root, "LICENSE"), path.join(mainDir, "LICENSE"));
 main.version = version;
 fs.writeFileSync(path.join(mainDir, "package.json"), JSON.stringify(main, null, 2) + "\n");
