@@ -14,8 +14,8 @@ try {
   bin = require.resolve(`${pkg}/bin/${exe}`);
 } catch {
   console.error(
-    `wa-tui: no wa binary for ${process.platform}-${process.arch}.\n` +
-      `Reinstall with optional dependencies enabled: npm i -g wa-tui`
+    `wa-terminal: no wa binary for ${process.platform}-${process.arch}.\n` +
+      `Reinstall with optional dependencies enabled: npm i -g wa-terminal`
   );
   process.exit(1);
 }
@@ -32,7 +32,7 @@ if (process.platform !== "win32") {
 
 const res = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
 if (res.error) {
-  console.error(`wa-tui: could not start ${bin}: ${res.error.message}`);
+  console.error(`wa-terminal: could not start ${bin}: ${res.error.message}`);
   process.exit(1);
 }
 if (res.signal) {

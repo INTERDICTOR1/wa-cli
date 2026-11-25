@@ -17,7 +17,7 @@ import (
 )
 
 // Package is the npm package wa is published as.
-const Package = "wa-tui"
+const Package = "wa-terminal"
 
 // InstallCommand installs or updates wa.
 const InstallCommand = "npm i -g " + Package

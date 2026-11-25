@@ -11,7 +11,7 @@
 ```
 
 [![CI](https://github.com/INTERDICTOR1/wa-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/INTERDICTOR1/wa-cli/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/wa-tui)](https://www.npmjs.com/package/wa-tui)
+[![npm](https://img.shields.io/npm/v/wa-terminal)](https://www.npmjs.com/package/wa-terminal)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 A WhatsApp client for your terminal, built in Go on top of [whatsmeow](https://github.com/tulir/whatsmeow).
@@ -44,7 +44,7 @@ manage chats/contacts/groups/media, all from the command line — with
 ## Install
 
 ```sh
-npm i -g wa-tui
+npm i -g wa-terminal
 wa login    # scan the QR code with WhatsApp on your phone
 wa          # open the chat app
 ```

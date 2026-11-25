@@ -1,4 +1,4 @@
-// Builds the npm packages for wa-tui into npm/dist, and optionally packs
+// Builds the npm packages for wa-terminal into npm/dist, and optionally packs
 // or publishes them.
 //
 //   node npm/build.mjs 1.1.0             build only
@@ -8,7 +8,7 @@
 // One package per platform carries the prebuilt binary,
 // @interdictor/wa-tui-<os>-<cpu>, installed only on matching machines
 // via "os"/"cpu". They are scoped because npm's spam filter rejects a
-// batch of similar new unscoped names. The main wa-tui package lists them
+// batch of similar new unscoped names. The main wa-terminal package lists them
 // all as optionalDependencies and runs the right one. Publishing skips
 // versions already on npm, so a run that stopped halfway can be repeated.
 // The .tgz files are written here rather than by `npm pack`, so the Unix
@@ -45,7 +45,7 @@ const targets = [
   ["linux", "arm64", "linux", "arm64"],
 ];
 
-const main = JSON.parse(fs.readFileSync(path.join(here, "wa-tui", "package.json"), "utf8"));
+const main = JSON.parse(fs.readFileSync(path.join(here, "wa-terminal", "package.json"), "utf8"));
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "inherit", ...opts });
 const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
 
@@ -71,7 +71,7 @@ for (const [os, cpu, goos, goarch] of targets) {
   const pkg = {
     name,
     version,
-    description: `The ${os}-${cpu} binary for wa-tui (install wa-tui, not this)`,
+    description: `The ${os}-${cpu} binary for wa-terminal (install wa-terminal, not this)`,
     repository: main.repository,
     license: main.license,
     os: [os],
@@ -85,12 +85,12 @@ for (const [os, cpu, goos, goarch] of targets) {
   dirs.push(dir);
 }
 
-const mainDir = path.join(dist, "wa-tui");
-// Only these files: anything else that lands in npm/wa-tui (an .npmrc,
+const mainDir = path.join(dist, "wa-terminal");
+// Only these files: anything else that lands in npm/wa-terminal (an .npmrc,
 // an .env) must never be published.
 for (const f of ["bin/wa.js", "README.md"]) {
   fs.mkdirSync(path.dirname(path.join(mainDir, f)), { recursive: true });
-  fs.copyFileSync(path.join(here, "wa-tui", f), path.join(mainDir, f));
+  fs.copyFileSync(path.join(here, "wa-terminal", f), path.join(mainDir, f));
 }
 fs.copyFileSync(path.join(root, "LICENSE"), path.join(mainDir, "LICENSE"));
 main.version = version;

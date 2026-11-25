@@ -32,7 +32,7 @@ func serve(t *testing.T, version string) *atomic.Int32 {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		w.Write([]byte(`{"name":"wa-tui","version":"` + version + `"}`))
+		w.Write([]byte(`{"name":"wa-terminal","version":"` + version + `"}`))
 	}))
 	t.Cleanup(srv.Close)
 	old := registryURL

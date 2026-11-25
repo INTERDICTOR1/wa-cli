@@ -1,5 +1,5 @@
 {
-  "name": "wa-tui",
+  "name": "wa-terminal",
   "version": "0.0.0",
   "description": "WhatsApp in your terminal: a full-screen chat app and a scriptable CLI",
   "keywords": ["whatsapp", "tui", "cli", "terminal", "chat"],

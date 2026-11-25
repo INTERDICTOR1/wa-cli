@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like v1.2.0 to publish that version to npm as wa-tui.
-# Uses npm trusted publishing: no token is stored. Each wa-tui package
+# Push a tag like v1.2.0 to publish that version to npm as wa-terminal.
+# Uses npm trusted publishing: no token is stored. Each wa-terminal package
 # on npm trusts this workflow (set with `npm trust github`).
 
 on:
