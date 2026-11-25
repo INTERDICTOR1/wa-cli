@@ -2,6 +2,7 @@ package msgstore
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -99,7 +100,7 @@ func (s *Store) SetReaction(chatJID, targetID string, r Reaction) (found bool, e
 		var stored string
 		err := tx.QueryRow(`SELECT reactions FROM messages
 			WHERE chat_jid = ? AND id = ?`, chatJID, targetID).Scan(&stored)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
@@ -135,7 +136,7 @@ func (s *Store) SetPollVote(chatJID, targetID string, v PollVote) (found bool, e
 		var stored string
 		err := tx.QueryRow(`SELECT poll_votes FROM messages
 			WHERE chat_jid = ? AND id = ?`, chatJID, targetID).Scan(&stored)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		if err != nil {

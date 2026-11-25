@@ -8,6 +8,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,7 +74,7 @@ func fetchLatest(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", &http.ProtocolError{ErrorString: resp.Status}
+		return "", fmt.Errorf("npm registry: %s", resp.Status)
 	}
 	var doc struct {
 		Version string `json:"version"`

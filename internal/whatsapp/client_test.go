@@ -226,7 +226,7 @@ func TestRetry_DoesNotRepeatOtherErrors(t *testing.T) {
 			calls++
 			return failure
 		})
-		if err != failure || calls != 1 {
+		if !errors.Is(err, failure) || calls != 1 {
 			t.Errorf("%v: got err=%v after %d calls, want that error after 1 call", failure, err, calls)
 		}
 	}

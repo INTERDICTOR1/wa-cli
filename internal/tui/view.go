@@ -53,7 +53,7 @@ func (m *model) View() string {
 	pane := make([]string, 0, l.bodyH)
 	pane = append(pane, m.renderHeader(l), faintStyle.Render(strings.Repeat("─", l.paneW)))
 	if m.overlay != nil {
-		pane = append(pane, m.overlay.view(m, l.paneW, l.msgH)...)
+		pane = append(pane, m.overlay.view(l.paneW, l.msgH)...)
 	} else {
 		pane = append(pane, m.renderMessages(l)...)
 	}

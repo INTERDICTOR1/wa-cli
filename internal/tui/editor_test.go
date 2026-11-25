@@ -72,7 +72,7 @@ func TestEditorUpDownAcrossLines(t *testing.T) {
 	if e.Down() {
 		t.Fatal("down on the last row should report false")
 	}
-	if !e.Up() || !e.Up() {
+	if first, second := e.Up(), e.Up(); !first || !second {
 		t.Fatal("up should move twice")
 	}
 	if !e.OnFirstRow() || e.Cursor() != len("first line") {

@@ -35,7 +35,7 @@ var chatListCmd = &cobra.Command{
 			return outputChats(cmd, chats)
 		}
 
-		chats, err := syncAndLoadChats(cmd)
+		chats, err := syncAndLoadChats()
 		if err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func init() {
 // then reads back the local chat store. Kept short (5s) since this runs
 // on every `wa chat list` call — `wa watch` (Phase 5) is the long-running
 // alternative for staying continuously in sync.
-func syncAndLoadChats(cmd *cobra.Command) ([]chatstore.Chat, error) {
+func syncAndLoadChats() ([]chatstore.Chat, error) {
 	var chats []chatstore.Chat
 	err := captureLibraryStdout(func() error {
 		ctx := context.Background()

@@ -258,13 +258,6 @@ func resolveMentions(text string, mentioned []string, resolve func(string) strin
 	return text
 }
 
-// isProtocolOnly reports whether msg is not a message of its own: pure
-// plumbing, or an event (reaction, edit, delete, vote, ...) that belongs
-// to another message.
-func isProtocolOnly(msg *waProto.Message) bool {
-	return analyze(unwrapMessage(msg)).Class != classRow
-}
-
 // firstFieldName returns the name of the first content field set on msg,
 // ignoring plumbing fields, with the "Message" suffix trimmed (so
 // locationMessage -> "location"). "" if there is no content field.

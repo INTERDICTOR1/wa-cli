@@ -121,7 +121,7 @@ func readLegacy(r io.Reader, fn func(Message) error) error {
 // endedEarly gives the bare "EOF" a decoder returns when the file stops
 // in the middle a message that says so.
 func endedEarly(err error) error {
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		return io.ErrUnexpectedEOF
 	}
 	return err

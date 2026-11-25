@@ -146,7 +146,7 @@ func Run(a *app.App) error {
 	realStdout := os.Stdout
 	logPath := filepath.Join(a.Config.DataDir, "tui.log")
 	capLogFile(logPath, 2<<20)
-	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 		os.Stdout = logFile
 		defer func() {
 			os.Stdout = realStdout

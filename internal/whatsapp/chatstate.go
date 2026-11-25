@@ -366,7 +366,7 @@ func (c *Client) SetTyping(ctx context.Context, chatJID string, typing bool) err
 	}
 	chat, err := c.sendTarget(chatJID)
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // typing is a hint: an unknown chat just gets none
 	}
 	state := types.ChatPresencePaused
 	if typing {
@@ -385,7 +385,7 @@ func (c *Client) WatchPresence(ctx context.Context, chatJID string) error {
 	}
 	chat, err := c.sendTarget(chatJID)
 	if err != nil || (chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer) {
-		return nil
+		return nil //nolint:nilerr // only one-to-one chats have an online status to watch
 	}
 	return quiet(c.WA.SubscribePresence(ctx, chat))
 }

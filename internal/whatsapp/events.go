@@ -226,22 +226,20 @@ func (c *Client) handleReceipt(evt *events.Receipt) {
 	}
 }
 
-// markReadLocally clears a chat's unread state in the store and reports
-// whether there was anything to clear.
-func (c *Client) markReadLocally(chatJID string) bool {
+// markReadLocally clears a chat's unread state in the store.
+func (c *Client) markReadLocally(chatJID string) {
 	if c.chats == nil {
-		return false
+		return
 	}
 	chat, ok, err := c.chats.Get(chatJID)
 	if err != nil || !ok || (chat.UnreadCount == 0 && !chat.MarkedUnread) {
-		return false
+		return
 	}
 	if err := c.chats.MarkRead(chatJID); err != nil {
 		c.log.Warnf("marking %s read failed: %v", chatJID, err)
-		return false
+		return
 	}
 	c.emit(ChatEvent{JID: chatJID})
-	return true
 }
 
 func (c *Client) handleChatPresence(evt *events.ChatPresence) {

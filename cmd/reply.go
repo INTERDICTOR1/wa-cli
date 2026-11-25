@@ -44,7 +44,7 @@ WhatsApp message ID if you already have one.`,
 			return err
 		}
 
-		client, _, _, err := connectForSend(ctx)
+		client, _, err := connectForSend(ctx)
 		if err != nil {
 			return err
 		}

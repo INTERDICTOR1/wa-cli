@@ -201,6 +201,9 @@ func TestDir_MkdirAllFailurePropagates(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(blocked, "sub"))
+	// macOS ignores XDG_CONFIG_HOME and uses $HOME/Library/Application
+	// Support, so point HOME under the file as well.
+	t.Setenv("HOME", filepath.Join(blocked, "sub"))
 
 	if _, err := Dir(); err == nil {
 		t.Fatal("Dir() should error when a path component exists as a file, not a directory")

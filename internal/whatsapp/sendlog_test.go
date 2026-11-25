@@ -12,7 +12,9 @@ import (
 // warnLog records Warnf lines; everything else is dropped.
 type warnLog struct{ lines []string }
 
-func (w *warnLog) Warnf(msg string, args ...any)  { w.lines = append(w.lines, fmt.Sprintf(msg, args...)) }
+func (w *warnLog) Warnf(msg string, args ...any) {
+	w.lines = append(w.lines, fmt.Sprintf(msg, args...))
+}
 func (w *warnLog) Errorf(msg string, args ...any) {}
 func (w *warnLog) Infof(msg string, args ...any)  {}
 func (w *warnLog) Debugf(msg string, args ...any) {}

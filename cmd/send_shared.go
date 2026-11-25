@@ -132,7 +132,7 @@ func checkSendGuards(jidStr string) error {
 		if !known {
 			fmt.Printf("You haven't messaged %s before. Send anyway? [y/N] ", jidStr)
 			var resp string
-			fmt.Scanln(&resp)
+			_, _ = fmt.Scanln(&resp) // no answer counts as no
 			if strings.ToLower(strings.TrimSpace(resp)) != "y" {
 				return fmt.Errorf("cancelled")
 			}
@@ -192,11 +192,11 @@ func recordSentMessage(ms *msgstore.Store, jid types.JID, msgID, text string) {
 
 // connectForSend opens a session-store-backed, connected client ready to
 // send. Callers must defer client.Disconnect().
-func connectForSend(ctx context.Context) (*whatsapp.Client, *chatstore.Store, *msgstore.Store, error) {
+func connectForSend(ctx context.Context) (*whatsapp.Client, *msgstore.Store, error) {
 	dbLog := waLog.Stdout("Database", "WARN", true)
 	container, err := store.Open(ctx, a.Config.DataDir, dbLog)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	cs := chatstore.New(a.Config.DataDir)
@@ -204,14 +204,14 @@ func connectForSend(ctx context.Context) (*whatsapp.Client, *chatstore.Store, *m
 
 	client, err := whatsapp.New(ctx, container, dbLog, cs, ms)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	if !client.IsLoggedIn() {
-		return nil, nil, nil, fmt.Errorf("not logged in: run 'wa login' first")
+		return nil, nil, fmt.Errorf("not logged in: run 'wa login' first")
 	}
 	if err := client.Connect(ctx); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	return client, cs, ms, nil
+	return client, ms, nil
 }

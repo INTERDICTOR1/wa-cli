@@ -6,13 +6,13 @@ package cmd
 // `go test ./cmd/... -run 'TestIsAllDigits|TestResolve|TestRecordSentMessage' -v` locally.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"bytes"
-	"strings"
 	"log/slog"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/codebyoketch/wa-cli/internal/app"
@@ -326,6 +326,7 @@ func TestCompleteConfigKeys_NoMatch(t *testing.T) {
 		t.Errorf("expected no matches, got %v", got)
 	}
 }
+
 // withAppDataDir points the package-level `a` at a fresh temp data dir
 // for the duration of the test, so resolveJID/resolveChat/etc. hit an
 // isolated chatstore instead of whatever's on the machine running the

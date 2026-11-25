@@ -229,7 +229,7 @@ func resolveJIDs(targets []string) ([]types.JID, error) {
 func confirm(prompt string) bool {
 	fmt.Printf("%s [y/N] ", prompt)
 	var resp string
-	fmt.Scanln(&resp)
+	_, _ = fmt.Scanln(&resp) // no answer counts as no
 	return strings.ToLower(strings.TrimSpace(resp)) == "y"
 }
 

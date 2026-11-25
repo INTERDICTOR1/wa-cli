@@ -246,7 +246,7 @@ func openExternal(target string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go cmd.Wait() // don't leave a zombie behind
+	go func() { _ = cmd.Wait() }() // don't leave a zombie behind
 	return nil
 }
 

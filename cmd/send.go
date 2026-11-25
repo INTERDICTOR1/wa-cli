@@ -34,7 +34,7 @@ in 'wa chat list') or a literal WhatsApp JID.`,
 			return err
 		}
 
-		client, _, ms, err := connectForSend(ctx)
+		client, ms, err := connectForSend(ctx)
 		if err != nil {
 			return err
 		}

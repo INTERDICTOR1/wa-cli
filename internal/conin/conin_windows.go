@@ -49,12 +49,12 @@ func Start(send func(tea.Msg), opts Options) (*Reader, error) {
 
 	in, err := windows.GetStdHandle(windows.STD_INPUT_HANDLE)
 	if err != nil {
-		return nil, nil
+		return nil, nil //nolint:nilerr // no standard input: there is nothing to read
 	}
 	var origMode uint32
 	if err := windows.GetConsoleMode(in, &origMode); err != nil {
 		// Only a console has a console mode: stdin is a pipe or a file.
-		return nil, nil
+		return nil, nil //nolint:nilerr // not a console: there is nothing to read
 	}
 
 	// The input mode decides what the console delivers to us:
@@ -357,7 +357,7 @@ func openTrace() *tracer {
 	if path == "" {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // the trace file is whatever path you name in WA_CONIN_TRACE
 	if err != nil {
 		return nil
 	}

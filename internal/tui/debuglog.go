@@ -15,7 +15,7 @@ func openDebugLog(dataDir string) {
 	if os.Getenv("WA_DEBUG") != "1" {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(dataDir, "wa-debug.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(filepath.Join(dataDir, "wa-debug.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err == nil {
 		debugFile = f
 	}

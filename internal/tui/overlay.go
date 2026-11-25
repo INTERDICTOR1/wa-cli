@@ -315,7 +315,7 @@ func (o *overlay) choose(m *model) tea.Cmd {
 }
 
 // view returns exactly h lines.
-func (o *overlay) view(m *model, w, h int) []string {
+func (o *overlay) view(w, h int) []string {
 	out := make([]string, 0, h)
 	head := " " + headerStyle.Render(oneLine(o.title))
 	if o.typing {

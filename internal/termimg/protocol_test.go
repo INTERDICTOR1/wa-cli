@@ -55,7 +55,7 @@ func TestProtocolNames(t *testing.T) {
 			t.Errorf("ParseProtocol(%q) = %v, %v; want %v, true", name, got, ok, p)
 		}
 	}
-	for in, want := range map[string]Protocol{"SIXEL": Sixel, " Kitty\n": Kitty, "iTerm": ITerm, "Blocks": Blocks} {
+	for in, want := range map[string]Protocol{"SIXEL": Sixel, " Kitty\n": Kitty, "iTerm": ITerm, "Blocks": Blocks} { //nolint:gocritic // the stray whitespace is what this tests
 		if got, ok := ParseProtocol(in); !ok || got != want {
 			t.Errorf("ParseProtocol(%q) = %v, %v; want %v, true", in, got, ok, want)
 		}

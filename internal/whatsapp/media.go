@@ -142,7 +142,7 @@ func (c *Client) SaveMedia(ctx context.Context, m msgstore.Message, dir string) 
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", waerrors.Wrap(err, "creating download folder")
 	}
 
@@ -206,7 +206,7 @@ func markFromInternet(path string) {
 	if runtime.GOOS != "windows" {
 		return
 	}
-	_ = os.WriteFile(path+":Zone.Identifier", []byte("[ZoneTransfer]\r\nZoneId=3\r\n"), 0o644)
+	_ = os.WriteFile(path+":Zone.Identifier", []byte("[ZoneTransfer]\r\nZoneId=3\r\n"), 0o600)
 }
 
 // mediaFileNames returns the names to save m's attachment under, in

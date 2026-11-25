@@ -42,6 +42,9 @@ jobs:
 
       - name: Test
         if: matrix.os == 'windows-latest'
+        # bash, not PowerShell: PowerShell splits -coverprofile=coverage.out
+        # at the dot and go test fails with "setup failed".
+        shell: bash
         run: go test -cover -coverprofile=coverage.out ./...
 
       - name: Upload coverage
@@ -67,4 +70,4 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.6
+          version: v2.15.0 # built with Go 1.26, which go.mod needs

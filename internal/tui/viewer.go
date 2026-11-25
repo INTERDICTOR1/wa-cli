@@ -281,7 +281,7 @@ func (v *viewer) clear(m *model) {
 
 // copyFile copies src into dir, returning the new path.
 func copyFile(src, dir string) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	dst := filepath.Join(dir, filepath.Base(src))

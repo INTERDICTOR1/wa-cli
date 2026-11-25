@@ -103,7 +103,7 @@ func Dir() (string, error) {
 		return "", waerrors.Wrap(err, "resolving user config dir")
 	}
 	dir := filepath.Join(base, "wa")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", waerrors.Wrap(err, "creating config dir")
 	}
 	return dir, nil

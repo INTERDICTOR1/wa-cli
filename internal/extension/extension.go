@@ -89,7 +89,7 @@ func Dir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(cfgDir, "extensions")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", waerrors.Wrap(err, "creating extensions dir")
 	}
 	return dir, nil
@@ -144,7 +144,7 @@ func Install(source string) (*Extension, error) {
 	}
 	// Best-effort: make sure the entrypoint is executable. Ignored on
 	// platforms/filesystems where chmod isn't meaningful (e.g. Windows).
-	_ = os.Chmod(entrypointAbs, 0o755)
+	_ = os.Chmod(entrypointAbs, 0o755) //nolint:gosec // the entrypoint has to be executable
 
 	finalPath := filepath.Join(extDir, manifest.Name)
 	if _, err := os.Stat(finalPath); err == nil {

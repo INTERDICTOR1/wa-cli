@@ -78,7 +78,7 @@ func helperExe(t *testing.T) string {
 		// Tests run with the package directory as working directory.
 		out, err := exec.Command("go", "build", "-o", bench.helperExe, "./internal/echo").CombinedOutput()
 		if err != nil {
-			bench.helperErr = fmt.Errorf("building the echo helper: %v\n%s", err, out)
+			bench.helperErr = fmt.Errorf("building the echo helper: %w\n%s", err, out)
 		}
 	})
 	if bench.helperErr != nil {

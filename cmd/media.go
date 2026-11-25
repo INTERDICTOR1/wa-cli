@@ -72,7 +72,7 @@ func newMediaSendCmd(kind string) *cobra.Command {
 				return err
 			}
 
-			client, _, _, err := connectForSend(ctx)
+			client, _, err := connectForSend(ctx)
 			if err != nil {
 				return err
 			}
@@ -166,7 +166,7 @@ omitted, a filename is derived from the message ID and the media's type.`,
 			outPath = defaultDownloadPath(msg, mimetype)
 		}
 
-		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+		if err := os.WriteFile(outPath, data, 0o600); err != nil {
 			return fmt.Errorf("writing file: %w", err)
 		}
 

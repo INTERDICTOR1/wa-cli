@@ -13,8 +13,56 @@ linters:
     - unconvert
     - unparam      # unused function parameters
 
+  settings:
+    errcheck:
+      # Writing to the terminal, closing on the way out, removing temp
+      # files, rolling back after a commit, and bufio writes (their errors
+      # come back from Flush): a failure there has nowhere useful to go.
+      exclude-functions:
+        - (*bufio.Writer).Write
+        - (*bufio.Writer).WriteByte
+        - (*database/sql.Tx).Rollback
+        - os.RemoveAll
+        - (*go.mau.fi/whatsmeow/store/sqlstore.Container).Close
+        - (*github.com/codebyoketch/wa-cli/internal/msgstore.Store).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*database/sql.DB).Close
+        - (*bufio.Writer).WriteString
+        - os.Remove
+    gosec:
+      excludes:
+        - G115 # int size conversions: values are counts and sizes far below the limits
+        - G304 # reading a file from a variable path: wa opens the files you name
+        - G204 # starting a program from a variable: opening media with the default app
+        - G104 # unchecked errors: errcheck already covers these
+        - G103 # unsafe: needed for the Windows console and memory APIs
+    staticcheck:
+      checks:
+        - all
+        - -ST*     # naming and comment style
+        - -QF1001  # "apply De Morgan's law": a style hint
+        - -QF1008  # "remove embedded field from selector": a style hint
+
   exclusions:
     rules:
+      # Tests write temp files and ignore cleanup errors on purpose.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+      # bubbletea deprecated MouseMsg.Type in favour of Action/Button. It
+      # still works; moving conin's mouse decoding over needs its own
+      # round of testing with a real mouse.
+      - path: internal/conin/keys\.go
+        text: "MouseAction & MouseButton"
+        linters:
+          - staticcheck
       # Test helpers legitimately call t.Fatalf instead of propagating
       # errors, and table-driven tests often have unused table fields
       # by design.
